@@ -1,0 +1,29 @@
+<svg width="760" height="420" viewBox="0 0 760 420" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#F5FBFF">
+    <path d="M52 304V72H120L266 214V72H336V304H270L122 160V304H52Z"/>
+    <path d="M390 72H688V140H576V304H504V140H390V72Z"/>
+    <path d="M346 72H420V304H346V72Z"/>
+    <path d="M390 72H442L362 152H310L390 72Z"/>
+  </g>
+  <g stroke="#F5FBFF" stroke-width="10" stroke-linecap="square" opacity="0.92">
+    <path d="M126 86L84 44"/>
+    <path d="M126 108L84 66"/>
+    <path d="M126 130L84 88"/>
+    <path d="M126 152L84 110"/>
+    <path d="M126 174L84 132"/>
+    <path d="M126 196L84 154"/>
+    <path d="M322 92L276 46"/>
+    <path d="M336 116L290 70"/>
+    <path d="M350 140L304 94"/>
+    <path d="M364 164L318 118"/>
+    <path d="M512 292L468 336"/>
+    <path d="M534 292L490 336"/>
+    <path d="M556 292L512 336"/>
+    <path d="M578 292L534 336"/>
+    <path d="M620 72L662 114"/>
+    <path d="M642 72L684 114"/>
+    <path d="M664 72L706 114"/>
+    <path d="M686 72L728 114"/>
+  </g>
+  <text x="84" y="384" fill="#F5FBFF" font-family="Arial, Helvetica, sans-serif" font-size="44" font-weight="800" letter-spacing="1">NIHON INFO TECH</text>
+</svg>
