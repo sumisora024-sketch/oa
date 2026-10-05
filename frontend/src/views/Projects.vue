@@ -174,8 +174,8 @@ async function save() {
 async function deleteProject(row) {
   try {
     await ElMessageBox.confirm(t('common.confirmDelete'), t('common.delete'), { type: 'warning' })
-    await api.delete(`/projects/${row.id}`)
-    ElMessage.success(t('common.success'))
+    const { data } = await api.delete(`/projects/${row.id}`)
+    if (!warnLockedSalary(data?.salary_sync)) ElMessage.success(t('common.success'))
     await load()
   } catch (error) {
     if (error === 'cancel') return
@@ -230,6 +230,15 @@ function assignedCount(row) {
 
 function isFull(row) {
   return row.headcount !== null && row.headcount !== undefined && assignedCount(row) >= row.headcount
+}
+
+function warnLockedSalary(sync) {
+  if (!sync) return false
+  const entries = sync.employees || [sync]
+  const locked = entries.flatMap((entry) => (entry.locked_months || []).map((month) => `${entry.employee_id}: ${month}`))
+  if (!locked.length) return false
+  ElMessage.warning(`給与がロックされているため金額を更新していません: ${locked.join(', ')}`)
+  return true
 }
 
 function openAssign(row) {
@@ -290,15 +299,16 @@ async function assign() {
       role: assignForm.role || null,
       status: 'assigned'
     }
+    let response
     if (assignForm.assignment_id) {
-      await api.put(`/projects/assignments/${assignForm.assignment_id}`, {
+      response = await api.put(`/projects/assignments/${assignForm.assignment_id}`, {
         ...body,
         project_id: assignForm.project_id
       })
     } else {
-      await api.post(`/projects/${assignForm.project_id}/assignments`, body)
+      response = await api.post(`/projects/${assignForm.project_id}/assignments`, body)
     }
-    ElMessage.success(t('common.success'))
+    if (!warnLockedSalary(response.data?.salary_sync)) ElMessage.success(t('common.success'))
     assignDialog.value = false
     await load()
   } catch (error) {
@@ -310,8 +320,8 @@ async function assign() {
 async function unassign(row, assignment) {
   try {
     await ElMessageBox.confirm(t('projects.unassignConfirm'), t('projects.unassign'), { type: 'warning' })
-    await api.delete(`/projects/assignments/${assignment.id}`)
-    ElMessage.success(t('common.success'))
+    const { data } = await api.delete(`/projects/assignments/${assignment.id}`)
+    if (!warnLockedSalary(data?.salary_sync)) ElMessage.success(t('common.success'))
     await load()
   } catch (error) {
     if (error === 'cancel') return

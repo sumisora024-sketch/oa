@@ -1,7 +1,7 @@
 import re
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 EMPLOYEE_NATIONALITIES = {"中国", "日本", "その他"}
@@ -9,7 +9,7 @@ GRADUATION_STATUSES = {"大学卒業", "短大卒業", "大学院修了", "中�
 CONTRACT_TYPES = {"正社員", "契約社員", "freelance", "アルバイト", "その他"}
 CONTRACT_COMPANIES = {"日本インフォテック株式会社", "その他"}
 PROJECT_NATIONALITY_REQUIREMENTS = {"日本籍のみ", "制限なし"}
-EMPLOYEE_TYPES = {"一般社員", "hr", "営業", "管理者"}
+EMPLOYEE_TYPES = {"一般社員", "hr", "総務", "営業", "管理者"}
 PARTNER_TYPES = {"upstream", "downstream", "both"}
 EXTERNAL_DIRECTIONS = {"upstream", "downstream", "both"}
 EXTERNAL_DOCUMENT_TYPES = {"purchase_order", "quotation", "invoice", "uploaded_contract", "partner_quotation", "partner_invoice"}
@@ -203,9 +203,26 @@ class EmployeeUpdate(BaseModel):
         return value
 
 
+class EmployeeSelfUpdate(BaseModel):
+    phone: str | None = None
+    nearest_station: str | None = None
+    languages: str | None = None
+    certifications: str | None = None
+    technical_experience: str | None = None
+    it_years: float | None = Field(default=None, ge=0)
+    talent_category: str | None = None
+    skills: list[SkillItem] | None = None
+
+    @field_validator("phone")
+    @classmethod
+    def phone_format(cls, value: str | None) -> str | None:
+        return validate_jp_phone(value) if value else value
+
+
 class EmployeeOut(EmployeeBase):
     id: int
     platform_email: str | None = None
+    salary_sync: dict | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -327,6 +344,7 @@ class ContractUpdate(BaseModel):
     vendor_company: str | None = None
     start_date: date | None = None
     end_date: date | None = None
+    parsed_text: str | None = None
     attributes: dict | None = None
 
     @field_validator("contract_type")
@@ -346,6 +364,8 @@ class ContractUpdate(BaseModel):
 
 class ContractOut(ContractBase):
     id: int
+    pdf_download_url: str | None = None
+    salary_sync: dict | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -376,6 +396,8 @@ class SalaryRecordOut(BaseModel):
     id: int
     employee_id: int
     employee_name: str | None = None
+    employee_email: str | None = None
+    employee_is_deleted: bool = False
     year_month: str
     monthly_hours: float | None = None
     estimated_salary: int
@@ -459,6 +481,13 @@ class AttendanceRequestCreate(BaseModel):
 
 class AttendanceDecisionIn(BaseModel):
     status: str
+    comment: str | None = None
+
+    @model_validator(mode="after")
+    def rejection_comment_required(self):
+        if self.status == "rejected" and not (self.comment or "").strip():
+            raise ValueError("却下理由を入力してください")
+        return self
 
 
 class AttendanceLeaveBalanceIn(BaseModel):
@@ -633,6 +662,7 @@ class AssignmentOut(BaseModel):
     employee_name: str
     role: str | None = None
     status: str
+    salary_sync: dict | None = None
     created_at: datetime
 
 
@@ -910,6 +940,7 @@ class WorkflowRequestOut(BaseModel):
     comment: str | None = None
     attributes: dict | None = None
     entity: dict | None = None
+    can_process: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -926,6 +957,12 @@ class WorkflowDecisionIn(BaseModel):
         if value not in {"approved", "rejected"}:
             raise ValueError("status must be approved or rejected")
         return value
+
+    @model_validator(mode="after")
+    def rejection_comment_required(self):
+        if self.status == "rejected" and not (self.comment or "").strip():
+            raise ValueError("却下理由を入力してください")
+        return self
 
 
 class ReimbursementBase(BaseModel):
@@ -1031,6 +1068,12 @@ class ExternalPersonnelStatusIn(BaseModel):
         if value not in {"submitted", "confirmed", "rejected"}:
             raise ValueError("status must be submitted, confirmed, or rejected")
         return value
+
+    @model_validator(mode="after")
+    def rejection_note_required(self):
+        if self.status == "rejected" and not (self.note or "").strip():
+            raise ValueError("却下理由を入力してください")
+        return self
 
 
 class MonthlySettlementOut(BaseModel):
@@ -1138,3 +1181,78 @@ class MailSettingsOut(BaseModel):
 class MailTestOut(BaseModel):
     ok: bool
     message: str
+
+
+class NotificationRuleUpdate(BaseModel):
+    enabled: bool
+    channels: list[str] = Field(default_factory=list)
+    recipient_roles: list[str] = Field(default_factory=list)
+    recipient_user_ids: list[int] = Field(default_factory=list)
+    include_related: bool = True
+    schedule: dict = Field(default_factory=dict)
+
+
+class WorkflowDefinitionUpdate(BaseModel):
+    enabled: bool
+    steps: list[dict] = Field(default_factory=list)
+
+    @field_validator("steps")
+    @classmethod
+    def validate_steps(cls, value: list[dict]) -> list[dict]:
+        if not value:
+            raise ValueError("承認ステップを1件以上設定してください")
+        normalized: list[dict] = []
+        for index, step in enumerate(value, start=1):
+            roles = sorted({str(item) for item in step.get("roles", []) if item})
+            user_ids = sorted({int(item) for item in step.get("user_ids", []) if str(item).isdigit()})
+            if not roles and not user_ids:
+                raise ValueError(f"承認ステップ{index}にロールまたは担当者を設定してください")
+            normalized.append({
+                "kind": "user" if user_ids and not roles else "role",
+                "roles": roles,
+                "user_ids": user_ids,
+                "label": str(step.get("label") or f"承認ステップ{index}"),
+            })
+        return normalized
+
+
+class DocumentAccessPolicyUpdate(BaseModel):
+    allowed_roles: list[str] = Field(default_factory=list)
+    owner_access: bool = True
+    related_access: bool = False
+
+
+class EmployeeProfileChangeIn(BaseModel):
+    full_name: str | None = None
+    name_kana: str | None = None
+    birth_date: date | None = None
+    graduation_status: str | None = None
+    residence: str | None = None
+    email: EmailStr | None = None
+    nationality: str | None = None
+    reason: str | None = None
+
+    @field_validator("full_name")
+    @classmethod
+    def profile_full_name_format(cls, value: str | None) -> str | None:
+        return validate_employee_name(value) if value is not None else value
+
+    @field_validator("nationality")
+    @classmethod
+    def profile_nationality_option(cls, value: str | None) -> str | None:
+        if value and value not in EMPLOYEE_NATIONALITIES:
+            raise ValueError("国籍は選択肢から選んでください")
+        return value
+
+    @field_validator("graduation_status")
+    @classmethod
+    def profile_graduation_option(cls, value: str | None) -> str | None:
+        if value and value not in GRADUATION_STATUSES:
+            raise ValueError("卒業区分は選択肢から選んでください")
+        return value
+
+    @model_validator(mode="after")
+    def at_least_one_change(self):
+        if not (self.model_fields_set - {"reason"}):
+            raise ValueError("変更する項目を1件以上入力してください")
+        return self

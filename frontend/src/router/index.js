@@ -4,6 +4,7 @@ import AppLayout from '../components/AppLayout.vue'
 import Login from '../views/Login.vue'
 import ForceResetPassword from '../views/ForceResetPassword.vue'
 import Home from '../views/Home.vue'
+import Profile from '../views/Profile.vue'
 import Employees from '../views/Employees.vue'
 import EmployeeOffboarding from '../views/EmployeeOffboarding.vue'
 import ExternalPersonnel from '../views/ExternalPersonnel.vue'
@@ -15,6 +16,7 @@ import DocumentManagement from '../views/DocumentManagement.vue'
 import Projects from '../views/Projects.vue'
 import Settings from '../views/Settings.vue'
 import PermissionManagement from '../views/PermissionManagement.vue'
+import PlatformSettings from '../views/PlatformSettings.vue'
 import Subcontracting from '../views/Subcontracting.vue'
 import Attendance from '../views/Attendance.vue'
 import { useAuthStore } from '../stores/auth'
@@ -31,6 +33,7 @@ const router = createRouter({
       children: [
         { path: '', redirect: '/home' },
         { path: 'home', name: 'home', component: Home, meta: { uiKey: 'home' } },
+        { path: 'profile', name: 'myProfile', component: Profile, meta: { module: 'employees', uiKey: 'home' } },
         { path: 'account/password', name: 'accountPassword', component: ForceResetPassword },
         { path: 'employees', redirect: '/employees/internal' },
         { path: 'employees/internal', name: 'internalEmployees', component: Employees, meta: { module: 'employees', uiKey: 'employees.internal' } },
@@ -44,10 +47,10 @@ const router = createRouter({
         { path: 'contracts/external/partners', name: 'externalPartners', component: ExternalContracts, meta: { module: 'external_contracts', uiKey: 'contracts.external.partners' } },
         { path: 'contracts/approvals', redirect: '/approvals/contracts' },
         { path: 'approvals', redirect: '/approvals/contracts' },
-        { path: 'approvals/contracts', name: 'approvalContracts', component: Approvals, meta: { module: 'approvals', uiKey: 'approvals.contracts' } },
-        { path: 'approvals/reimbursements', name: 'approvalReimbursements', component: Approvals, meta: { module: 'approvals', uiKey: 'approvals.reimbursements' } },
+        { path: 'approvals/contracts', name: 'approvalContracts', component: Approvals, meta: { uiKey: 'approvals.contracts' } },
+        { path: 'approvals/reimbursements', name: 'approvalReimbursements', component: Approvals, meta: { uiKey: 'approvals.reimbursements' } },
         { path: 'approvals/attendance', name: 'approvalAttendance', component: Approvals, meta: { module: 'attendance', uiKey: 'approvals.attendance' } },
-        { path: 'approvals/offboarding', name: 'approvalOffboarding', component: Approvals, meta: { module: 'approvals', uiKey: 'approvals.offboarding' } },
+        { path: 'approvals/offboarding', name: 'approvalOffboarding', component: Approvals, meta: { uiKey: 'approvals.offboarding' } },
         { path: 'reimbursements', redirect: '/reimbursements/claims' },
         { path: 'reimbursements/claims', name: 'reimbursements', component: Reimbursements, meta: { module: 'reimbursements', uiKey: 'reimbursements.claims' } },
         { path: 'reimbursements/salaries', name: 'salaryManagement', component: Contracts, meta: { module: 'contracts', uiKey: 'reimbursements.salaries' } },
@@ -57,7 +60,7 @@ const router = createRouter({
         { path: 'documents/quotations', name: 'documentQuotations', component: ExternalContracts, meta: { module: 'external_contracts', uiKey: 'documents.quotations' } },
         { path: 'documents/invoices', name: 'documentInvoices', component: ExternalContracts, meta: { module: 'external_contracts', uiKey: 'documents.invoices' } },
         { path: 'documents/history', name: 'documentHistory', component: ExternalContracts, meta: { module: 'external_contracts', uiKey: 'documents.history' } },
-        { path: 'documents/library', name: 'documents', component: DocumentManagement, meta: { admin: true, uiKey: 'documents.library' } },
+        { path: 'documents/library', name: 'documents', component: DocumentManagement, meta: { uiKey: 'documents.library' } },
         { path: 'subcontracting', redirect: '/subcontracting/notice' },
         { path: 'subcontracting/notice', name: 'subcontractingNotice', component: Subcontracting, meta: { module: 'subcontracting', uiKey: 'subcontracting.notice' } },
         { path: 'subcontracting/quotations', name: 'subcontractingQuotations', component: Subcontracting, meta: { module: 'subcontracting', uiKey: 'subcontracting.quotations' } },
@@ -72,6 +75,7 @@ const router = createRouter({
         { path: 'settings', redirect: '/settings/mail' },
         { path: 'settings/mail', name: 'settings', component: Settings, meta: { admin: true, uiKey: 'settings.mail' } },
         { path: 'settings/permissions', name: 'permissionManagement', component: PermissionManagement, meta: { admin: true, uiKey: 'settings.permissions' } }
+        ,{ path: 'settings/platform', name: 'platformSettings', component: PlatformSettings, meta: { admin: true, uiKey: 'settings.platform' } }
       ]
     }
   ]
@@ -87,6 +91,7 @@ router.beforeEach(async (to) => {
   await auth.bootstrap()
   if (auth.user?.must_reset_password && to.name !== 'resetPasswordRequired') return '/reset-password-required'
   if (!auth.user?.must_reset_password && to.name === 'resetPasswordRequired') return '/home'
+  if (to.name === 'accountPassword' && auth.user?.role === 'admin') return '/home'
   const module = to.meta.module
   if (to.meta.admin && auth.user?.role !== 'admin') return '/home'
   if (to.meta.uiKey && !auth.canUi(to.meta.uiKey)) return '/home'

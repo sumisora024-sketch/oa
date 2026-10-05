@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models import Employee
 from app.schemas import EMPLOYEE_TYPES
 from app.services.accounts import ensure_employee_user
+from app.services.salary_signals import register_salary_refresh
 
 
 HEADER_ALIASES = {
@@ -90,6 +91,19 @@ def normalize_employee_type(value: Any) -> str:
         "营业": "営業",
         "管理员": "管理者",
     }.get(text, text or "一般社員")
+
+
+def role_for_employee_type(employee_type: str | None) -> str:
+    value = (employee_type or "").strip().lower()
+    if value == "hr":
+        return "hr"
+    if "総務" in value or "soumu" in value:
+        return "soumu"
+    if "管理" in value or "admin" in value:
+        return "admin"
+    if "営業" in value or "pm" in value or "sales" in value:
+        return "pm"
+    return "employee"
 
 
 def normalize_graduation(value: Any) -> str | None:
@@ -186,6 +200,7 @@ def import_employees_from_xlsx(file_obj, db: Session) -> dict[str, Any]:
             continue
 
         employee = db.scalar(select(Employee).where(Employee.email == email))
+        previous_birth_date = employee.birth_date if employee else None
         was_deleted = bool(employee and employee.is_deleted)
         is_new = employee is None or was_deleted
         if is_new:
@@ -220,11 +235,21 @@ def import_employees_from_xlsx(file_obj, db: Session) -> dict[str, Any]:
         if is_new:
             db.add(employee)
             db.flush()
-            ensure_employee_user(db, employee, must_reset_password=True)
+            linked_user = ensure_employee_user(db, employee, must_reset_password=True)
+            linked_user.role = role_for_employee_type(employee.employee_type)
             created += 1
         else:
-            ensure_employee_user(db, employee, must_reset_password=False)
+            linked_user = ensure_employee_user(db, employee, must_reset_password=False)
+            linked_user.role = role_for_employee_type(employee.employee_type)
             updated += 1
+        if previous_birth_date != employee.birth_date:
+            register_salary_refresh(
+                db,
+                employee.id,
+                months=None,
+                include_current=True,
+                reason="employee_birth_date_imported",
+            )
 
     db.commit()
     return {"created": created, "updated": updated, "errors": errors}
@@ -239,6 +264,7 @@ def import_fixed_resume(data: dict[str, Any], db: Session) -> dict[str, Any]:
         return {"created": 0, "updated": 0, "errors": ["固定履历书缺少邮箱，请在履历书邮件栏补充邮箱后重新导入"]}
 
     employee = db.scalar(select(Employee).where(Employee.email == email))
+    previous_birth_date = employee.birth_date if employee else None
     was_deleted = bool(employee and employee.is_deleted)
     is_new = employee is None or was_deleted
     if is_new:
@@ -270,5 +296,13 @@ def import_fixed_resume(data: dict[str, Any], db: Session) -> dict[str, Any]:
         created, updated = 0, 1
     employee.employee_type = normalize_employee_type(employee.employee_type)
     ensure_employee_user(db, employee, must_reset_password=is_new)
+    if previous_birth_date != employee.birth_date:
+        register_salary_refresh(
+            db,
+            employee.id,
+            months=None,
+            include_current=True,
+            reason="employee_birth_date_imported",
+        )
     db.commit()
     return {"created": created, "updated": updated, "errors": []}

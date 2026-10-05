@@ -16,6 +16,16 @@ SENSITIVE_KEYS = {"password", "token", "secret", "api_key", "apikey", "authoriza
 SKIP_PREFIXES = {"/api/auth/login", "/api/auth/password", "/api/settings/mail"}
 
 
+def is_download_request(request: Request) -> bool:
+    path = request.url.path.lower()
+    return request.method.upper() == "GET" and (
+        path.endswith("/download")
+        or path.endswith(".pdf")
+        or "/fixed-files/" in path
+        or path.endswith("/fixed-files/download-all")
+    )
+
+
 def sanitize(value: Any) -> Any:
     if isinstance(value, dict):
         cleaned = {}
@@ -63,7 +73,8 @@ def user_from_request(request: Request) -> User | None:
 async def audit_mutation_request(request: Request, call_next):
     method = request.method.upper()
     path = request.url.path
-    if method in {"GET", "HEAD", "OPTIONS"} or any(path.startswith(prefix) for prefix in SKIP_PREFIXES):
+    download_request = is_download_request(request)
+    if (method in {"GET", "HEAD", "OPTIONS"} and not download_request) or any(path.startswith(prefix) for prefix in SKIP_PREFIXES):
         return await call_next(request)
 
     payload: Any = None
@@ -100,7 +111,7 @@ async def audit_mutation_request(request: Request, call_next):
                 method=method,
                 path=path,
                 module=infer_module(path),
-                action=method.lower(),
+                action="download" if download_request else method.lower(),
                 entity_type=infer_module(path),
                 entity_id=infer_entity_id(path),
                 after={"request": payload, "status_code": response.status_code},

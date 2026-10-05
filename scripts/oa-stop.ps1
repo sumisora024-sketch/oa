@@ -15,4 +15,14 @@ foreach ($port in $ports) {
     }
 }
 
+foreach ($pidFile in @("D:\oa\backend\celery-worker.pid", "D:\oa\backend\celery-beat.pid")) {
+    if (Test-Path $pidFile) {
+        $servicePid = Get-Content $pidFile -ErrorAction SilentlyContinue
+        if ($servicePid) {
+            Stop-Process -Id ([int]$servicePid) -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Host "OA services stopped."

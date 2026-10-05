@@ -24,7 +24,7 @@ const formRef = ref(null)
 const settingsFormRef = ref(null)
 const balanceFormRef = ref(null)
 const section = computed(() => route.path.split('/').pop() || 'summary')
-const canManage = computed(() => ['admin', 'hr'].includes(auth.user?.role))
+const canManage = computed(() => ['admin', 'soumu', 'hr'].includes(auth.user?.role))
 const canAdmin = computed(() => auth.user?.role === 'admin')
 const employees = computed(() => summary.value.rows.map((row) => ({ id: row.employee_id, name: row.employee_name })))
 

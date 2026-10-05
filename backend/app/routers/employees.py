@@ -10,13 +10,26 @@ from app.core.permissions import can_read_employee, can_update_employee, ensure_
 from app.core.security import get_password_hash
 from app.db import get_db
 from app.deps import get_current_user
-from app.models import Employee, User
-from app.schemas import EmployeeCreate, EmployeeOut, EmployeeUpdate
+from app.models import Employee, User, WorkflowRequest
+from app.schemas import EmployeeCreate, EmployeeOut, EmployeeProfileChangeIn, EmployeeSelfUpdate, EmployeeUpdate, WorkflowRequestOut
 from app.services.offboarding import create_immediate_offboarding
+from app.services.salary import refresh_salary_records_for_employee
 from app.services.accounts import ensure_employee_user
 from app.services.xlsx_import import import_employees_from_xlsx
+from app.services.workflow import create_workflow_request
 
 router = APIRouter(prefix="/employees", tags=["employees"])
+
+SELF_EDITABLE_FIELDS = {
+    "phone",
+    "nearest_station",
+    "languages",
+    "certifications",
+    "technical_experience",
+    "it_years",
+    "talent_category",
+    "skills",
+}
 
 
 def calculate_age(birth_date):
@@ -30,6 +43,8 @@ def role_from_employee_type(employee_type: str | None) -> str:
     text = (employee_type or "").strip().lower()
     if text == "hr":
         return "hr"
+    if "総務" in text or "soumu" in text:
+        return "soumu"
     if "admin" in text or "\u7ba1\u7406" in text or "管理" in text:
         return "admin"
     if "pm" in text or "sales" in text or "\u8425\u4e1a" in text or "営業" in text:
@@ -39,7 +54,7 @@ def role_from_employee_type(employee_type: str | None) -> str:
 
 @router.get("", response_model=list[EmployeeOut])
 def list_employees(q: str | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    if user.role not in {"admin", "hr", "pm"}:
+    if user.role not in {"admin", "soumu", "hr", "pm"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     stmt = select(Employee).where(Employee.is_deleted.is_(False)).order_by(Employee.created_at.desc())
     if q:
@@ -86,6 +101,93 @@ def download_my_employment_info(db: Session = Depends(get_db), user: User = Depe
     return download_employment_info(user.employee_id, db, user)
 
 
+@router.get("/me", response_model=EmployeeOut)
+def get_my_profile(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if not user.employee_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="社員情報が紐付いていません")
+    employee = db.get(Employee, user.employee_id)
+    if not employee or employee.is_deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="社員情報が見つかりません")
+    return employee
+
+
+@router.patch("/me", response_model=EmployeeOut)
+def update_my_profile(
+    payload: EmployeeSelfUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not user.employee_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="社員情報が紐付いていません")
+    employee = db.get(Employee, user.employee_id)
+    if not employee or employee.is_deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="社員情報が見つかりません")
+    updates = payload.model_dump(exclude_unset=True)
+    if "skills" in updates and updates["skills"] is not None:
+        updates["skills"] = [item.model_dump() if hasattr(item, "model_dump") else item for item in payload.skills or []]
+    for key, value in updates.items():
+        setattr(employee, key, value)
+    db.commit()
+    db.refresh(employee)
+    return employee
+
+
+@router.get("/me/change-requests", response_model=list[WorkflowRequestOut])
+def list_my_profile_change_requests(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    rows = list(
+        db.scalars(
+            select(WorkflowRequest)
+            .where(
+                WorkflowRequest.workflow_type == "employee_profile_change",
+                WorkflowRequest.requester_id == user.id,
+            )
+            .order_by(WorkflowRequest.created_at.desc())
+        ).all()
+    )
+    return rows
+
+
+@router.post("/me/change-requests", response_model=WorkflowRequestOut)
+def create_my_profile_change_request(
+    payload: EmployeeProfileChangeIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not user.employee_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="社員情報が紐付いていません")
+    employee = db.get(Employee, user.employee_id)
+    if not employee or employee.is_deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="社員情報が見つかりません")
+    existing = db.scalar(
+        select(WorkflowRequest.id).where(
+            WorkflowRequest.workflow_type == "employee_profile_change",
+            WorkflowRequest.entity_id == employee.id,
+            WorkflowRequest.status == "pending",
+        )
+    )
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="処理中の個人情報変更申請があります")
+    changes = payload.model_dump(exclude_unset=True, mode="json")
+    reason = changes.pop("reason", None)
+    before = {
+        key: value.isoformat() if hasattr((value := getattr(employee, key)), "isoformat") else value
+        for key in changes
+    }
+    workflow = create_workflow_request(
+        db,
+        workflow_type="employee_profile_change",
+        entity_type="employee_profile_change",
+        entity_id=employee.id,
+        title=f"個人情報変更申請: {employee.full_name}",
+        requester_id=user.id,
+        attributes={"before": before, "changes": changes, "reason": reason, "related_user_ids": [user.id]},
+        link="/approvals/contracts",
+    )
+    db.commit()
+    db.refresh(workflow)
+    return workflow
+
+
 @router.get("/{employee_id}", response_model=EmployeeOut)
 def get_employee(employee_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     employee = db.get(Employee, employee_id)
@@ -104,9 +206,11 @@ def update_employee(employee_id: int, payload: EmployeeUpdate, db: Session = Dep
     if not can_update_employee(user, employee):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     updates = payload.model_dump(exclude_unset=True)
+    if user.role not in {"admin", "soumu", "hr"}:
+        updates = {key: value for key, value in updates.items() if key in SELF_EDITABLE_FIELDS}
     if "employee_type" in updates and user.role != "admin":
         updates.pop("employee_type")
-    if user.role not in {"admin", "hr"}:
+    if user.role not in {"admin", "soumu", "hr"}:
         updates.pop("estimated_annual_salary", None)
         updates.pop("estimated_annual_salary_manual", None)
     if "estimated_annual_salary" in updates and "estimated_annual_salary_manual" not in updates:
@@ -117,6 +221,13 @@ def update_employee(employee_id: int, payload: EmployeeUpdate, db: Session = Dep
         setattr(employee, key, value)
     if "birth_date" in updates:
         employee.age = calculate_age(employee.birth_date)
+        employee.salary_sync = refresh_salary_records_for_employee(
+            db,
+            employee.id,
+            months=None,
+            include_current=True,
+            reason="employee_birth_date_changed",
+        )
     if user.role == "admin":
         linked_user = ensure_employee_user(db, employee, must_reset_password=True)
         if "employee_type" in updates:
@@ -154,7 +265,7 @@ def delete_employee(employee_id: int, db: Session = Depends(get_db), user: User 
 
 @router.post("/import-xlsx")
 def import_xlsx(file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    if user.role not in {"admin", "hr"}:
+    if user.role not in {"admin", "soumu", "hr"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     if not file.filename.endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请上传 xlsx 文件")

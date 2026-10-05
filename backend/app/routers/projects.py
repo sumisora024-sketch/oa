@@ -12,7 +12,7 @@ from app.models import Employee, Project, ProjectAssignment, User
 from app.schemas import AssignmentCreate, AssignmentOut, AssignmentUpdate, CandidateScore, EmailAnalyzeIn, ProjectCreate, ProjectOut, ProjectUpdate
 from app.services.ai import build_recommendation_prompt, extract_project_metadata, score_candidates
 from app.services.mailbox import poll_mailbox_once
-from app.services.salary import refresh_salary_record_for_employee
+from app.services.salary import refresh_salary_records_for_employee
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -63,6 +63,7 @@ def assignment_out(assignment: ProjectAssignment) -> dict:
         "employee_name": assignment.employee.full_name if assignment.employee else str(assignment.employee_id),
         "role": assignment.role,
         "status": assignment.status,
+        "salary_sync": getattr(assignment, "salary_sync", None),
         "created_at": assignment.created_at,
     }
 
@@ -155,9 +156,19 @@ def delete_project(project_id: int, db: Session = Depends(get_db), user: User = 
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="案件不存在")
+    employee_ids = {
+        assignment.employee_id
+        for assignment in project.assignments
+        if assignment.status == "assigned"
+    }
     db.delete(project)
+    db.flush()
+    salary_sync = [
+        refresh_salary_records_for_employee(db, employee_id, reason="project_deleted")
+        for employee_id in employee_ids
+    ]
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "salary_sync": {"employees": salary_sync}}
 
 
 @router.post("/{project_id}/assignments", response_model=AssignmentOut)
@@ -181,7 +192,9 @@ def assign_employee(project_id: int, payload: AssignmentCreate, db: Session = De
         assignment = ProjectAssignment(project_id=project_id, employee_id=payload.employee_id, role=payload.role, status=payload.status)
         db.add(assignment)
     db.flush()
-    refresh_salary_record_for_employee(db, payload.employee_id)
+    assignment.salary_sync = refresh_salary_records_for_employee(
+        db, payload.employee_id, reason="project_assignment_created"
+    )
     db.commit()
     db.refresh(assignment)
     return assignment_out(assignment)
@@ -214,9 +227,14 @@ def update_assignment(assignment_id: int, payload: AssignmentUpdate, db: Session
         assignment.role = updates["role"]
     assignment.status = target_status
     db.flush()
-    refresh_salary_record_for_employee(db, old_employee_id)
+    salary_sync = [
+        refresh_salary_records_for_employee(db, old_employee_id, reason="project_assignment_updated")
+    ]
     if target_employee_id != old_employee_id:
-        refresh_salary_record_for_employee(db, target_employee_id)
+        salary_sync.append(
+            refresh_salary_records_for_employee(db, target_employee_id, reason="project_assignment_updated")
+        )
+    assignment.salary_sync = {"employees": salary_sync}
     db.commit()
     db.refresh(assignment)
     return assignment_out(assignment)
@@ -230,7 +248,9 @@ def unassign_employee(assignment_id: int, db: Session = Depends(get_db), user: U
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="归属记录不存在")
     assignment.status = "unassigned"
     db.flush()
-    refresh_salary_record_for_employee(db, assignment.employee_id)
+    assignment.salary_sync = refresh_salary_records_for_employee(
+        db, assignment.employee_id, reason="project_assignment_removed"
+    )
     db.commit()
     db.refresh(assignment)
     return assignment_out(assignment)

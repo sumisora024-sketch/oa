@@ -77,6 +77,7 @@ class Contract(Base):
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     end_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     pdf_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pdf_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     parsed_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     attributes: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
@@ -85,6 +86,10 @@ class Contract(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     employee = relationship("Employee", back_populates="contracts")
+
+    @property
+    def pdf_download_url(self) -> str | None:
+        return f"/api/contracts/{self.id}/pdf/download" if self.pdf_path else None
 
 
 class Project(Base):
@@ -450,6 +455,95 @@ class AuditLog(Base):
     after: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+    __table_args__ = (
+        UniqueConstraint("actor_key", "method", "path", "idempotency_key", name="uq_idempotency_request"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    actor_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    method: Mapped[str] = mapped_column(String(16), nullable=False)
+    path: Mapped[str] = mapped_column(String(384), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="processing")
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class NotificationRule(Base):
+    __tablename__ = "notification_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    event_code: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    channels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    recipient_roles: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    recipient_user_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    include_related: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    schedule: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    __table_args__ = (UniqueConstraint("event_key", "recipient_key", name="uq_notification_event_recipient"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    event_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    event_code: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    recipient_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    recipient_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    link: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    visible_in_app: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    email_status: Mapped[str] = mapped_column(String(32), nullable=False, default="skipped", index=True)
+    email_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    email_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emailed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attributes: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    user = relationship("User", foreign_keys=[user_id])
+
+
+class WorkflowDefinition(Base):
+    __tablename__ = "workflow_definitions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    workflow_type: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    steps: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class DocumentAccessPolicy(Base):
+    __tablename__ = "document_access_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    document_type: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    allowed_roles: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    owner_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    related_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
 class PasswordResetToken(Base):

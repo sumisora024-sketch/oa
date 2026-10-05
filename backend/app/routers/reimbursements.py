@@ -12,6 +12,7 @@ from app.deps import get_current_user
 from app.models import Employee, Reimbursement, User, WorkflowRequest
 from app.schemas import REIMBURSEMENT_TYPES, ReimbursementOut, ReimbursementUpdate
 from app.services.external_documents import safe_filename
+from app.services.workflow import create_workflow_request
 
 router = APIRouter(prefix="/reimbursements", tags=["reimbursements"])
 
@@ -26,7 +27,7 @@ def next_month(value: date | None = None) -> str:
 
 
 def can_manage_all(user: User) -> bool:
-    return user.role in {"admin", "hr"}
+    return user.role in {"admin", "soumu", "hr"}
 
 
 def ensure_visible(user: User, reimbursement: Reimbursement) -> None:
@@ -166,15 +167,16 @@ def create_reimbursement(
     db.add(row)
     db.flush()
     row.invoice_file_paths = save_files(row.id, files)
-    workflow = WorkflowRequest(
+    create_workflow_request(
+        db,
         workflow_type="reimbursement",
         entity_type="reimbursement",
         entity_id=row.id,
         title=f"経費精算申請 - {employee.full_name} - {row.pay_month}",
         requester_id=user.id,
         attributes={"related_user_ids": [user.id], "employee_id": employee.id},
+        link="/approvals/reimbursements",
     )
-    db.add(workflow)
     db.commit()
     db.refresh(row)
     return reimbursement_out(row)

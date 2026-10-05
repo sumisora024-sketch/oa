@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter, useRoute } from 'vue-router'
 import { Briefcase, ClipboardCheck, Clock3, FileText, HandCoins, Handshake, Home, KeyRound, Languages, LogOut, Moon, Settings, Sun, Users } from 'lucide-vue-next'
 import { useAuthStore } from '../stores/auth'
+import NotificationCenter from './NotificationCenter.vue'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -14,6 +15,7 @@ const fixedLabels = {
   offboarding: { zh: '退职', ja: '退職', en: 'Offboarding' },
   offboardingApproval: { zh: '退职审批', ja: '退職承認', en: 'Offboarding approvals' }
 }
+const platformLabel = computed(() => ({ ja: '共通機能設定', zh: '公共能力设置', en: 'Shared capabilities' }[locale.value] || '共通機能設定'))
 
 function applyTheme(value) {
   document.documentElement.classList.toggle('theme-dark', value === 'dark')
@@ -35,7 +37,7 @@ const menu = computed(() => {
   if (ui('employees.internal') && auth.canAny('employees', ['read', 'read_self', 'update', 'import', 'create'])) {
     employeeChildren.push({ path: '/employees/internal', label: t('nav.internalEmployees') })
   }
-  if (ui('employees.external') && auth.canAny('external_personnel', ['read', 'create', 'update', 'confirm']) && ['admin', 'hr'].includes(auth.user?.role)) {
+  if (ui('employees.external') && auth.canAny('external_personnel', ['read', 'create', 'update', 'confirm']) && ['admin', 'soumu', 'hr'].includes(auth.user?.role)) {
     employeeChildren.push({ path: '/employees/external', label: t('nav.externalEmployees') })
   }
   if (employeeChildren.length) {
@@ -70,23 +72,23 @@ const menu = computed(() => {
   if (ui('documents.history') && auth.canAny('external_contracts', ['read', 'download'])) {
     documentChildren.push({ path: '/documents/history', label: t('nav.documentHistory') })
   }
-  if (ui('documents.library') && auth.user?.role === 'admin') {
+  if (ui('documents.library')) {
     documentChildren.push({ path: '/documents/library', label: t('nav.documentLibrary') })
   }
   if (documentChildren.length) {
     items.push({ path: '/documents', label: t('nav.documentManagement'), icon: FileText, children: documentChildren })
   }
   const approvalChildren = []
-  if (ui('approvals.contracts') && auth.canAny('approvals', ['read', 'approve'])) {
+  if (ui('approvals.contracts')) {
     approvalChildren.push({ path: '/approvals/contracts', label: t('nav.contractApprovals') })
   }
-  if (ui('approvals.reimbursements') && auth.canAny('approvals', ['read', 'approve']) && ['admin', 'hr'].includes(auth.user?.role)) {
+  if (ui('approvals.reimbursements')) {
     approvalChildren.push({ path: '/approvals/reimbursements', label: t('nav.reimbursementApprovals') })
   }
   if (ui('approvals.attendance') && auth.canAny('attendance', ['approve'])) {
     approvalChildren.push({ path: '/approvals/attendance', label: t('nav.attendanceApprovals') })
   }
-  if (ui('approvals.offboarding') && auth.canAny('approvals', ['read', 'approve']) && ['admin', 'hr'].includes(auth.user?.role)) {
+  if (ui('approvals.offboarding')) {
     approvalChildren.push({ path: '/approvals/offboarding', label: fixedLabel('offboardingApproval') })
   }
   if (approvalChildren.length) {
@@ -140,6 +142,7 @@ const menu = computed(() => {
   }
   if (auth.user?.role === 'admin') {
     settingChildren.push({ path: '/settings/permissions', label: t('nav.permissionManagement') })
+    settingChildren.push({ path: '/settings/platform', label: platformLabel.value })
   }
   if (settingChildren.length) {
     items.push({ path: '/settings', label: t('nav.settings'), icon: Settings, children: settingChildren })
@@ -194,10 +197,11 @@ async function logout() {
           <div class="user-role">{{ t('app.role') }}: {{ auth.user?.role }}</div>
         </div>
         <div class="top-actions">
+          <NotificationCenter />
           <Languages :size="18" />
           <el-segmented :model-value="locale" :options="['zh', 'ja', 'en']" @update:model-value="changeLocale" />
           <el-button :icon="theme === 'dark' ? Sun : Moon" circle @click="toggleTheme" />
-          <el-button :icon="KeyRound" @click="router.push('/account/password')">{{ t('app.changePassword') }}</el-button>
+          <el-button v-if="auth.user?.role !== 'admin'" :icon="KeyRound" @click="router.push('/account/password')">{{ t('app.changePassword') }}</el-button>
           <el-button :icon="LogOut" @click="logout">{{ t('app.logout') }}</el-button>
         </div>
       </header>

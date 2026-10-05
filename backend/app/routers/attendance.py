@@ -31,7 +31,8 @@ from app.services.attendance import (
     month_bounds,
     request_paid_leave_days,
 )
-from app.services.salary import ensure_salary_records, refresh_salary_record_for_employee
+from app.services.salary import ensure_salary_records, refresh_salary_records_for_employee
+from app.services.salary_signals import register_salary_refresh
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
@@ -58,7 +59,7 @@ def settings_out(row) -> dict:
 
 
 def visible_employees(db: Session, user: User) -> list[Employee]:
-    if user.role in {"admin", "hr"}:
+    if user.role in {"admin", "soumu", "hr"}:
         return list(db.scalars(select(Employee).where(Employee.is_deleted.is_(False)).order_by(Employee.full_name)).all())
     if user.employee_id:
         employee = db.get(Employee, user.employee_id)
@@ -67,14 +68,18 @@ def visible_employees(db: Session, user: User) -> list[Employee]:
 
 
 def sync_salary_after_attendance(db: Session, employee_id: int, work_date: date) -> None:
-    record = refresh_salary_record_for_employee(db, employee_id, work_date.strftime("%Y-%m"))
-    if record and record.locked:
-        return
+    refresh_salary_records_for_employee(
+        db,
+        employee_id,
+        months={work_date.strftime("%Y-%m")},
+        include_current=False,
+        reason="attendance_changed",
+    )
 
 
 @router.get("/settings", response_model=AttendanceSettingsOut)
 def get_settings(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     return settings_out(get_attendance_settings(db))
 
 
@@ -86,23 +91,38 @@ def update_settings(payload: AttendanceSettingsIn, db: Session = Depends(get_db)
         setattr(row, key, value)
     db.commit()
     db.refresh(row)
-    ensure_salary_records(db, current_year_month())
+    ensure_salary_records(
+        db,
+        current_year_month(),
+        enqueue_after_commit=True,
+        reason="attendance_settings_changed",
+    )
     return settings_out(row)
 
 
 @router.post("/calendar/import", response_model=list[WorkCalendarDayOut])
 def import_calendar(year: int | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     target_year = year or date.today().year
     rows = generate_work_calendar_year(db, target_year)
-    for month in range(1, 13):
-        ensure_salary_records(db, f"{target_year}-{month:02d}")
+    months = {f"{target_year}-{month:02d}" for month in range(1, 13)}
+    for month in sorted(months):
+        ensure_salary_records(db, month)
+    for employee in visible_employees(db, user):
+        register_salary_refresh(
+            db,
+            employee.id,
+            months=months,
+            include_current=False,
+            reason="work_calendar_imported",
+        )
+    db.commit()
     return rows
 
 
 @router.get("/calendar", response_model=list[WorkCalendarDayOut])
 def list_calendar(year_month: str | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    ensure_role(user, {"admin", "hr", "pm", "employee"})
+    ensure_role(user, {"admin", "soumu", "hr", "pm", "employee"})
     ym = year_month or current_year_month()
     start, end = month_bounds(ym)
     generate_work_calendar_year(db, start.year)
@@ -132,7 +152,13 @@ def update_calendar_day(
     row.holiday_name = payload.holiday_name
     row.note = payload.note
     row.source = "manual"
-    ensure_salary_records(db, work_date.strftime("%Y-%m"))
+    db.flush()
+    ensure_salary_records(
+        db,
+        work_date.strftime("%Y-%m"),
+        enqueue_after_commit=True,
+        reason="work_calendar_day_changed",
+    )
     db.commit()
     db.refresh(row)
     return row
@@ -144,7 +170,7 @@ def attendance_summary(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr", "pm", "employee"})
+    ensure_role(user, {"admin", "soumu", "hr", "pm", "employee"})
     ym = year_month or current_year_month()
     settings = get_attendance_settings(db)
     rows = [monthly_attendance_for_employee(db, employee, ym) for employee in visible_employees(db, user)]
@@ -159,13 +185,13 @@ def list_requests(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr", "pm", "employee"})
+    ensure_role(user, {"admin", "soumu", "hr", "pm", "employee"})
     ym = year_month or current_year_month()
     start, end = month_bounds(ym)
     stmt = select(AttendanceRequest).where(AttendanceRequest.work_date >= start, AttendanceRequest.work_date <= end)
     if status_filter:
         stmt = stmt.where(AttendanceRequest.status == status_filter)
-    if user.role not in {"admin", "hr"}:
+    if user.role not in {"admin", "soumu", "hr"}:
         if not user.employee_id:
             return []
         stmt = stmt.where(AttendanceRequest.employee_id == user.employee_id)
@@ -175,10 +201,10 @@ def list_requests(
 
 @router.post("/requests", response_model=AttendanceRequestOut)
 def create_request(payload: AttendanceRequestCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    ensure_role(user, {"admin", "hr", "pm", "employee"})
+    ensure_role(user, {"admin", "soumu", "hr", "pm", "employee"})
     if payload.request_type not in REQUEST_TYPES:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="invalid request_type")
-    employee_id = payload.employee_id if user.role in {"admin", "hr"} else user.employee_id
+    employee_id = payload.employee_id if user.role in {"admin", "soumu", "hr"} else user.employee_id
     if not employee_id:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="employee_id is required")
     employee = db.get(Employee, employee_id)
@@ -191,9 +217,9 @@ def create_request(payload: AttendanceRequestCreate, db: Session = Depends(get_d
         requested_hours=payload.requested_hours,
         reason=payload.reason,
         requester_id=user.id,
-        status="approved" if user.role in {"admin", "hr"} else "pending",
-        approver_id=user.id if user.role in {"admin", "hr"} else None,
-        approved_at=datetime.utcnow() if user.role in {"admin", "hr"} else None,
+        status="approved" if user.role in {"admin", "soumu", "hr"} else "pending",
+        approver_id=user.id if user.role in {"admin", "soumu", "hr"} else None,
+        approved_at=datetime.utcnow() if user.role in {"admin", "soumu", "hr"} else None,
     )
     db.add(row)
     db.flush()
@@ -211,7 +237,7 @@ def decide_request(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     if payload.status not in {"approved", "rejected", "pending"}:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="status must be approved/rejected/pending")
     row = db.get(AttendanceRequest, request_id)
@@ -232,7 +258,14 @@ def decide_request(
     else:
         row.approver_id = user.id
         row.approved_at = datetime.utcnow()
+    attrs = dict(row.attributes or {})
+    if payload.status == "rejected":
+        attrs["approval_comment"] = payload.comment.strip()
+    else:
+        attrs.pop("approval_comment", None)
+    row.attributes = attrs
     row.status = payload.status
+    db.flush()
     sync_salary_after_attendance(db, row.employee_id, row.work_date)
     db.commit()
     db.refresh(row)
@@ -245,7 +278,7 @@ def list_leave_balances(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr", "pm", "employee"})
+    ensure_role(user, {"admin", "soumu", "hr", "pm", "employee"})
     year = fiscal_year or date.today().year
     return [leave_balance_for_employee(db, employee, year) for employee in visible_employees(db, user)]
 
@@ -256,7 +289,7 @@ def upsert_leave_balance(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     employee = db.get(Employee, payload.employee_id)
     if not employee or employee.is_deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="employee not found")

@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Download, RefreshCw } from 'lucide-vue-next'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import TablePager from '../components/TablePager.vue'
 import { usePagination } from '../composables/pagination'
 import { api } from '../api/client'
@@ -24,9 +24,9 @@ const attendanceRows = ref([])
 const approvalMonth = ref(currentMonth())
 const displayRows = computed(() => activeTab.value === 'attendance' ? attendanceRows.value : rows.value)
 const pendingCount = computed(() => displayRows.value.filter((item) => item.status === 'pending').length)
-const canSeeReimbursement = computed(() => ['admin', 'hr'].includes(auth.user?.role))
-const canSeeAttendance = computed(() => ['admin', 'hr'].includes(auth.user?.role))
-const canSeeOffboarding = computed(() => ['admin', 'hr'].includes(auth.user?.role))
+const canSeeReimbursement = computed(() => auth.canUi('approvals.reimbursements'))
+const canSeeAttendance = computed(() => auth.canUi('approvals.attendance'))
+const canSeeOffboarding = computed(() => auth.canUi('approvals.offboarding'))
 const pageTitle = computed(() => {
   if (activeTab.value === 'reimbursement') return t('approvals.reimbursementApprovals')
   if (activeTab.value === 'attendance') return t('approvals.attendanceApprovals')
@@ -72,10 +72,21 @@ async function load() {
 
 async function decide(row, status) {
   try {
-    await api.post(`/approvals/${row.id}/decision`, { status })
+    let comment = null
+    if (status === 'rejected') {
+      const result = await ElMessageBox.prompt(t('approvals.rejectPrompt'), t('approvals.rejectTitle'), {
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+        inputType: 'textarea',
+        inputValidator: (value) => Boolean(String(value || '').trim()) || t('approvals.rejectRequired')
+      })
+      comment = result.value.trim()
+    }
+    await api.post(`/approvals/${row.id}/decision`, { status, comment })
     ElMessage.success(t('common.success'))
     await load()
   } catch (error) {
+    if (error === 'cancel' || error === 'close') return
     if (error?.response) showApiError(error)
   }
 }
@@ -92,10 +103,21 @@ async function withdraw(row) {
 
 async function decideAttendance(row, status) {
   try {
-    await api.post(`/attendance/requests/${row.id}/decision`, { status })
+    let comment = null
+    if (status === 'rejected') {
+      const result = await ElMessageBox.prompt(t('approvals.rejectPrompt'), t('approvals.rejectTitle'), {
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+        inputType: 'textarea',
+        inputValidator: (value) => Boolean(String(value || '').trim()) || t('approvals.rejectRequired')
+      })
+      comment = result.value.trim()
+    }
+    await api.post(`/attendance/requests/${row.id}/decision`, { status, comment })
     ElMessage.success(t('common.success'))
     await load()
   } catch (error) {
+    if (error === 'cancel' || error === 'close') return
     if (error?.response) showApiError(error)
   }
 }
@@ -164,9 +186,9 @@ watch(approvalMonth, () => {
           <el-table-column fixed="right" :label="t('common.actions')" width="260">
             <template #default="{ row }">
               <el-button v-if="row.entity?.download_url" text :icon="Download" @click="download(row.entity.download_url)" />
-              <el-button v-if="row.status === 'pending'" text type="success" @click="decide(row, 'approved')">{{ t('external.approve') }}</el-button>
-              <el-button v-if="row.status === 'pending'" text type="danger" @click="decide(row, 'rejected')">{{ t('external.reject') }}</el-button>
-              <el-button v-if="row.status === 'approved'" text type="warning" @click="withdraw(row)">{{ t('external.withdraw') }}</el-button>
+              <el-button v-if="row.status === 'pending' && row.can_process" text type="success" @click="decide(row, 'approved')">{{ t('external.approve') }}</el-button>
+              <el-button v-if="row.status === 'pending' && row.can_process" text type="danger" @click="decide(row, 'rejected')">{{ t('external.reject') }}</el-button>
+              <el-button v-if="row.status === 'approved' && row.can_process" text type="warning" @click="withdraw(row)">{{ t('external.withdraw') }}</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -196,9 +218,9 @@ watch(approvalMonth, () => {
           <el-table-column prop="approver_name" label="承認者" width="130" />
           <el-table-column fixed="right" :label="t('common.actions')" width="260">
             <template #default="{ row }">
-              <el-button v-if="row.status === 'pending'" text type="success" @click="decide(row, 'approved')">{{ t('external.approve') }}</el-button>
-              <el-button v-if="row.status === 'pending'" text type="danger" @click="decide(row, 'rejected')">{{ t('external.reject') }}</el-button>
-              <el-button v-if="row.status === 'approved'" text type="warning" @click="withdraw(row)">{{ t('external.withdraw') }}</el-button>
+              <el-button v-if="row.status === 'pending' && row.can_process" text type="success" @click="decide(row, 'approved')">{{ t('external.approve') }}</el-button>
+              <el-button v-if="row.status === 'pending' && row.can_process" text type="danger" @click="decide(row, 'rejected')">{{ t('external.reject') }}</el-button>
+              <el-button v-if="row.status === 'approved' && row.can_process" text type="warning" @click="withdraw(row)">{{ t('external.withdraw') }}</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -243,9 +265,9 @@ watch(approvalMonth, () => {
           <el-table-column prop="approver_name" label="承認者" width="130" />
           <el-table-column fixed="right" :label="t('common.actions')" width="260">
             <template #default="{ row }">
-              <el-button v-if="row.status === 'pending'" text type="success" @click="decide(row, 'approved')">{{ t('external.approve') }}</el-button>
-              <el-button v-if="row.status === 'pending'" text type="danger" @click="decide(row, 'rejected')">{{ t('external.reject') }}</el-button>
-              <el-button v-if="row.status === 'approved'" text type="warning" @click="withdraw(row)">{{ t('external.withdraw') }}</el-button>
+              <el-button v-if="row.status === 'pending' && row.can_process" text type="success" @click="decide(row, 'approved')">{{ t('external.approve') }}</el-button>
+              <el-button v-if="row.status === 'pending' && row.can_process" text type="danger" @click="decide(row, 'rejected')">{{ t('external.reject') }}</el-button>
+              <el-button v-if="row.status === 'approved' && row.can_process" text type="warning" @click="withdraw(row)">{{ t('external.withdraw') }}</el-button>
             </template>
           </el-table-column>
         </el-table>

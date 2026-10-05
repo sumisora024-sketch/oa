@@ -11,6 +11,8 @@ __pycache__/
 backend/.venv/
 backend/storage/
 backend/*.log
+backend/*.pid
+backend/celerybeat-schedule*
 
 frontend/node_modules/
 frontend/dist/

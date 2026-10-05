@@ -97,6 +97,10 @@ def extract_stamp_asset() -> Path | None:
     ensure_storage_dirs()
     target = ASSET_DIR / "nit_stamp.png"
 
+    prepared = REFER_DIR / "nit_stamp.png"
+    if prepared.exists():
+        return prepared
+
     source = REFER_DIR / "请求书.png"
     if not source.exists():
         source = REFER_DIR / "发注书.png"

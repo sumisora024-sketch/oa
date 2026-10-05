@@ -32,6 +32,7 @@ from app.services.external_documents import (
     normalize_items,
     safe_filename,
 )
+from app.services.workflow import create_workflow_request
 
 router = APIRouter(prefix="/subcontracting", tags=["subcontracting"])
 
@@ -148,17 +149,16 @@ def approved_partner_quotation(db: Session, partner_id: int, quotation_id: int) 
 
 
 def create_document_workflow(db: Session, doc: ExternalDocument, workflow_type: str, requester_id: int | None) -> WorkflowRequest:
-    workflow = WorkflowRequest(
+    workflow = create_workflow_request(
+        db,
         workflow_type=workflow_type,
         entity_type="external_document",
         entity_id=doc.id,
         title=f"{doc.partner.company_name if doc.partner else doc.partner_id} {doc.target_month} {workflow_type}",
-        status="pending",
         requester_id=requester_id,
         attributes={"partner_id": doc.partner_id, "document_no": doc.document_no, "target_month": doc.target_month},
+        link="/approvals/contracts",
     )
-    db.add(workflow)
-    db.flush()
     attrs = dict(doc.attributes or {})
     attrs["workflow_id"] = workflow.id
     doc.attributes = attrs
@@ -473,17 +473,16 @@ def submit_partner_quotation(
     db.add(doc)
     db.flush()
     doc.file_path = str(create_document_file(partner, doc))
-    workflow = WorkflowRequest(
+    workflow = create_workflow_request(
+        db,
         workflow_type="partner_quotation",
         entity_type="external_document",
         entity_id=doc.id,
-        title=f"{partner.company_name} {doc.target_month} partner quotation",
-        status="pending",
+        title=f"{partner.company_name} {doc.target_month} 見積書",
         requester_id=user.id,
         attributes={"partner_id": partner.id, "document_no": doc.document_no, "target_month": doc.target_month},
+        link="/approvals/contracts",
     )
-    db.add(workflow)
-    db.flush()
     attrs = dict(doc.attributes or {})
     attrs["workflow_id"] = workflow.id
     doc.attributes = attrs

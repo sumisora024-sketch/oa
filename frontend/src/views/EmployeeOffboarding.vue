@@ -17,7 +17,7 @@ const dialog = ref(false)
 const formRef = ref(null)
 const loading = ref(false)
 
-const canManage = computed(() => ['admin', 'hr'].includes(auth.user?.role))
+const canManage = computed(() => ['admin', 'soumu', 'hr'].includes(auth.user?.role))
 const reasonOptions = ['自己都合', '会社都合', '契約終了', 'その他']
 const form = reactive(defaultForm())
 const filteredRows = computed(() => {

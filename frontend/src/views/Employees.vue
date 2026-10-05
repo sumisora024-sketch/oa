@@ -24,11 +24,11 @@ const canCreate = computed(() => auth.can('employees', 'create'))
 const canImport = computed(() => auth.can('employees', 'import'))
 const canUpdate = computed(() => auth.can('employees', 'update') || auth.can('employees', 'update_self'))
 const canManageRole = computed(() => auth.user?.role === 'admin')
-const canManageAnnual = computed(() => ['admin', 'hr'].includes(auth.user?.role))
+const canManageAnnual = computed(() => ['admin', 'soumu', 'hr'].includes(auth.user?.role))
 const canResetPassword = computed(() => auth.user?.role === 'admin')
 const nationalityOptions = ['中国', '日本', 'その他']
 const graduationOptions = ['大学卒業', '短大卒業', '大学院修了', '中退・その他']
-const employeeTypeOptions = ['一般社員', 'hr', '営業', '管理者']
+const employeeTypeOptions = ['一般社員', 'hr', '総務', '営業', '管理者']
 const namePattern = /^[A-Za-z\u3040-\u30ff\u3400-\u9fff々〆ヶ・ー\s\u3000.'-]+$/u
 const employeeTypeFilters = computed(() => employeeTypeOptions.map((option) => ({ text: option, value: option })))
 const nationalityFilters = computed(() => nationalityOptions.map((option) => ({ text: option, value: option })))
@@ -146,12 +146,18 @@ async function load() {
 async function save() {
   try {
     await formRef.value?.validate()
+    let response
     if (editingId.value) {
-      await api.put(`/employees/${editingId.value}`, payload())
+      response = await api.put(`/employees/${editingId.value}`, payload())
     } else {
-      await api.post('/employees', payload())
+      response = await api.post('/employees', payload())
     }
-    ElMessage.success(t('common.success'))
+    const lockedMonths = response.data?.salary_sync?.locked_months || []
+    if (lockedMonths.length) {
+      ElMessage.warning(`給与がロックされているため金額を更新していません: ${lockedMonths.join(', ')}`)
+    } else {
+      ElMessage.success(t('common.success'))
+    }
     dialog.value = false
     await load()
   } catch (error) {

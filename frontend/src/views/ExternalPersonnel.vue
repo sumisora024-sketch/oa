@@ -18,7 +18,7 @@ const editingId = ref(null)
 const formRef = ref(null)
 const q = ref('')
 
-const canEdit = computed(() => ['admin', 'hr'].includes(auth.user?.role))
+const canEdit = computed(() => ['admin', 'soumu', 'hr'].includes(auth.user?.role))
 const partnerOptions = computed(() => partners.value.map((item) => ({ label: item.company_name, value: item.id })))
 const { pager, pageRows } = usePagination(rows)
 
@@ -142,10 +142,21 @@ async function save() {
 
 async function setStatus(row, status) {
   try {
-    await api.post(`/external-personnel/${row.id}/status`, { status })
+    let note = null
+    if (status === 'rejected') {
+      const result = await ElMessageBox.prompt(t('approvals.rejectPrompt'), t('approvals.rejectTitle'), {
+        confirmButtonText: t('common.confirm'),
+        cancelButtonText: t('common.cancel'),
+        inputType: 'textarea',
+        inputValidator: (value) => Boolean(String(value || '').trim()) || t('approvals.rejectRequired')
+      })
+      note = result.value.trim()
+    }
+    await api.post(`/external-personnel/${row.id}/status`, { status, note })
     ElMessage.success(t('common.success'))
     await load()
   } catch (error) {
+    if (error === 'cancel' || error === 'close') return
     if (error?.response) showApiError(error)
   }
 }

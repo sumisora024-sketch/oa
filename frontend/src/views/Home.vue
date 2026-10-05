@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { Building2, CalendarDays, Download, FileText, Mail, MapPin, MessageCircle, RefreshCw, Send, ShieldCheck, Sparkles, TrainFront, UserRound, X } from 'lucide-vue-next'
+import { Building2, CalendarDays, Download, FileText, Mail, MapPin, MessageCircle, Pencil, RefreshCw, Send, ShieldCheck, Sparkles, TrainFront, UserRound, X } from 'lucide-vue-next'
 import { api } from '../api/client'
 
 const { t, locale } = useI18n()
@@ -100,9 +100,10 @@ function download(url) {
 
 function salaryPdfUrl(kind) {
   if (!salary.value?.id) return null
+  const version = encodeURIComponent(salary.value.updated_at || Date.now())
   return kind === 'annual'
-    ? `/api/contracts/salaries/${salary.value.id}/annual-estimate.pdf`
-    : `/api/contracts/salaries/${salary.value.id}/payslip.pdf`
+    ? `/api/contracts/salaries/${salary.value.id}/annual-estimate.pdf?v=${version}`
+    : `/api/contracts/salaries/${salary.value.id}/payslip.pdf?v=${version}`
 }
 
 function difyLanguage(value) {
@@ -221,7 +222,10 @@ onMounted(load)
 
       <section class="home-dashboard">
         <article class="home-panel profile-panel">
-          <h3>{{ t('home.profile') }}</h3>
+          <div class="panel-title-row">
+            <h3>{{ t('home.profile') }}</h3>
+            <el-button v-if="data.employee" text type="primary" :icon="Pencil" @click="router.push('/profile')">{{ t('common.edit') }}</el-button>
+          </div>
           <template v-if="data.employee">
             <div class="fact"><UserRound :size="16" /> {{ data.employee.full_name }}</div>
             <div class="fact"><Mail :size="16" /> {{ data.employee.email }}</div>
@@ -434,6 +438,17 @@ onMounted(load)
 .home-panel h3,
 .service-tile h3 {
   margin: 0 0 14px;
+}
+
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-title-row h3 {
+  margin: 0;
 }
 
 .salary-panel {

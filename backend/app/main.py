@@ -5,7 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.init_db import init_db
-from app.routers import ai_assistant, attendance, approvals, auth, contracts, documents, employees, external, external_personnel, homepage, mail_settings, offboarding, projects, reimbursements, subcontracting, ui_permissions
+from app.migrations import upgrade_database
+from app.routers import ai_assistant, attendance, approvals, auth, contracts, documents, employees, external, external_personnel, homepage, mail_settings, notifications, offboarding, platform, projects, reimbursements, subcontracting, ui_permissions
 from app.services.audit import audit_mutation_request
 from app.services.contract_reminders import contract_reminder_loop
 from app.services.idempotency import reject_duplicate_mutation
@@ -30,6 +31,7 @@ app.middleware("http")(reject_duplicate_mutation)
 async def init_db_with_retry(retries: int = 30, delay_seconds: int = 2) -> None:
     for attempt in range(1, retries + 1):
         try:
+            upgrade_database()
             init_db()
             return
         except Exception as exc:
@@ -42,9 +44,10 @@ async def init_db_with_retry(retries: int = 30, delay_seconds: int = 2) -> None:
 @app.on_event("startup")
 async def startup() -> None:
     await init_db_with_retry()
-    app.state.mailbox_task = asyncio.create_task(mailbox_listener_loop())
-    app.state.contract_reminder_task = asyncio.create_task(contract_reminder_loop())
-    app.state.offboarding_task = asyncio.create_task(offboarding_loop())
+    if settings.embedded_scheduler_enabled:
+        app.state.mailbox_task = asyncio.create_task(mailbox_listener_loop())
+        app.state.contract_reminder_task = asyncio.create_task(contract_reminder_loop())
+        app.state.offboarding_task = asyncio.create_task(offboarding_loop())
 
 
 @app.on_event("shutdown")
@@ -93,3 +96,5 @@ app.include_router(external_personnel.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(mail_settings.router, prefix="/api")
 app.include_router(ui_permissions.router, prefix="/api")
+app.include_router(notifications.router, prefix="/api")
+app.include_router(platform.router, prefix="/api")

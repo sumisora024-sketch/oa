@@ -1,3 +1,4 @@
+from calendar import monthrange
 from datetime import date
 
 from sqlalchemy import select
@@ -6,9 +7,19 @@ from sqlalchemy.orm import Session
 from app.models import Contract, Employee, ProjectAssignment, Reimbursement, SalaryRecord
 from app.services.offboarding import offboarding_final_month, salary_offboarding_for_month
 from app.services.attendance import monthly_work_hours
+from app.services.salary_signals import register_salary_refresh
+from app.services.payroll_engine import estimate_payroll_deductions
 
-EMPLOYMENT_INSURANCE_RATE = 0.0055
+EMPLOYMENT_INSURANCE_RATE = 0.005
 RECONSTRUCTION_TAX_RATE = 1.021
+AUTO_DEDUCTION_KEYS = {
+    "pension",
+    "health_insurance",
+    "insurance_fee",
+    "care_insurance",
+    "employment_insurance",
+    "income_tax",
+}
 
 
 def current_year_month(today: date | None = None) -> str:
@@ -16,8 +27,22 @@ def current_year_month(today: date | None = None) -> str:
     return value.strftime("%Y-%m")
 
 
-def current_contract_for_employee(db: Session, employee_id: int, today: date | None = None) -> Contract | None:
-    current = today or date.today()
+def salary_month_bounds(year_month: str) -> tuple[date, date]:
+    year, month = (int(part) for part in year_month.split("-", 1))
+    return date(year, month, 1), date(year, month, monthrange(year, month)[1])
+
+
+def current_contract_for_employee(
+    db: Session,
+    employee_id: int,
+    today: date | None = None,
+    year_month: str | None = None,
+) -> Contract | None:
+    if year_month:
+        period_start, period_end = salary_month_bounds(year_month)
+    else:
+        current = today or date.today()
+        period_start = period_end = current
     contracts = list(
         db.scalars(
             select(Contract)
@@ -27,8 +52,8 @@ def current_contract_for_employee(db: Session, employee_id: int, today: date | N
         ).all()
     )
     for contract in contracts:
-        starts_ok = contract.start_date is None or contract.start_date <= current
-        ends_ok = contract.end_date is None or contract.end_date >= current
+        starts_ok = contract.start_date is None or contract.start_date <= period_end
+        ends_ok = contract.end_date is None or contract.end_date >= period_start
         if starts_ok and ends_ok:
             return contract
     return None
@@ -76,21 +101,29 @@ def detail_salary_settings(detail: dict | None) -> dict:
     health_insurance = detail.get("health_insurance")
     if health_insurance is None:
         health_insurance = detail.get("insurance_fee")
+    manual_deductions = set(detail.get("manual_deductions") or [])
+
+    def manual_amount(key: str, value: object, *aliases: str) -> int | None:
+        if key not in manual_deductions and not any(alias in manual_deductions for alias in aliases):
+            return None
+        return amount_value(value)
+
     return {
         "hours_band_low": low,
         "hours_band_high": high,
         "hours_range": hours_range,
-        "pension": amount_value(detail.get("pension")),
+        "pension": manual_amount("pension", detail.get("pension")),
         "resident_tax": amount_value(detail.get("resident_tax")),
-        "health_insurance": amount_value(health_insurance),
-        "insurance_fee": amount_value(health_insurance),
-        "care_insurance": amount_value(detail.get("care_insurance")),
-        "employment_insurance": optional_amount(detail, "employment_insurance"),
-        "income_tax": optional_amount(detail, "income_tax"),
+        "health_insurance": manual_amount("health_insurance", health_insurance, "insurance_fee"),
+        "insurance_fee": manual_amount("health_insurance", health_insurance, "insurance_fee"),
+        "care_insurance": manual_amount("care_insurance", detail.get("care_insurance")),
+        "employment_insurance": manual_amount("employment_insurance", detail.get("employment_insurance")),
+        "income_tax": manual_amount("income_tax", detail.get("income_tax")),
         "other_deduction": amount_value(detail.get("other_deduction")),
         "commuting_allowance": amount_value(detail.get("commuting_allowance")),
         "other_payment": amount_value(detail.get("other_payment")),
         "employment_insurance_rate": float(detail.get("employment_insurance_rate") or EMPLOYMENT_INSURANCE_RATE),
+        "manual_deductions": sorted(manual_deductions),
     }
 
 
@@ -259,6 +292,7 @@ def salary_calculation_for_employee(
     calculation_detail: dict | None = None,
     year_month: str | None = None,
 ) -> dict | None:
+    employee = db.get(Employee, employee_id)
     offboarding = salary_offboarding_for_month(db, employee_id, year_month)
     if offboarding and year_month:
         final_month = offboarding_final_month(offboarding)
@@ -266,7 +300,7 @@ def salary_calculation_for_employee(
             return zero_salary_detail(employee_id, year_month, "offboarding_after_final_salary", offboarding)
         if year_month == final_month and offboarding.final_salary_hours is not None:
             monthly_hours = offboarding.final_salary_hours
-    contract = current_contract_for_employee(db, employee_id)
+    contract = current_contract_for_employee(db, employee_id, year_month=year_month)
     if not contract or not contract.attributes:
         if offboarding and offboarding.final_salary_amount is not None:
             detail = zero_salary_detail(employee_id, year_month, "offboarding_final_salary_manual", offboarding)
@@ -285,6 +319,13 @@ def salary_calculation_for_employee(
     unit_low = round(base_salary / hours_band_high)
     unit_high = round(base_salary / hours_band_low)
     has_active_project = active_project_assignment_count(db, employee_id) > 0
+    if (
+        year_month
+        and year_month < current_year_month()
+        and calculation_detail
+        and "project_assigned" in calculation_detail
+    ):
+        has_active_project = bool(calculation_detail["project_assigned"])
     effective_monthly_hours = monthly_hours
     if monthly_hours is None and has_active_project:
         effective_monthly_hours = hours_band_low
@@ -314,6 +355,7 @@ def salary_calculation_for_employee(
         "employment_insurance": settings["employment_insurance"],
         "employment_insurance_rate": settings["employment_insurance_rate"],
         "income_tax": settings["income_tax"],
+        "manual_deductions": settings["manual_deductions"],
         "other_deduction": settings["other_deduction"],
         "commuting_allowance": commuting_allowance,
         "other_payment": other_payment,
@@ -327,12 +369,12 @@ def salary_calculation_for_employee(
     if not has_active_project:
         detail["estimated_salary"] = base_salary
         detail["rule"] = "no_project_base_only"
-        enrich_payroll_detail(detail)
+        enrich_payroll_detail(detail, employee)
         return apply_offboarding_detail(detail, offboarding, year_month) if offboarding else detail
 
     if effective_monthly_hours is None:
         detail["estimated_salary"] = base_salary
-        enrich_payroll_detail(detail)
+        enrich_payroll_detail(detail, employee)
         return apply_offboarding_detail(detail, offboarding, year_month) if offboarding else detail
 
     normal_salary = base_salary + allowance_total
@@ -354,11 +396,11 @@ def salary_calculation_for_employee(
         detail["overtime"] = overtime
 
     detail["estimated_salary"] = max(round(estimated), 0)
-    enrich_payroll_detail(detail)
+    enrich_payroll_detail(detail, employee)
     return apply_offboarding_detail(detail, offboarding, year_month) if offboarding else detail
 
 
-def enrich_payroll_detail(detail: dict) -> None:
+def enrich_payroll_detail(detail: dict, employee: Employee | None = None) -> None:
     estimated_salary = int(detail.get("estimated_salary") or 0)
     reimbursement_amount = int(detail.get("reimbursement_amount") or 0)
     commuting_allowance = int(detail.get("commuting_allowance") or 0)
@@ -369,27 +411,38 @@ def enrich_payroll_detail(detail: dict) -> None:
     taxable_payment_total = max(estimated_salary + other_payment, 0)
     gross_payment_total = max(taxable_payment_total + reimbursement_amount + commuting_allowance, 0)
 
-    pension = int(detail.get("pension") or 0)
-    health_insurance = int(detail.get("health_insurance") or detail.get("insurance_fee") or 0)
-    care_insurance = int(detail.get("care_insurance") or 0)
+    manual_deductions = set(detail.get("manual_deductions") or [])
+    auto_deductions = estimate_payroll_deductions(
+        taxable_payment_total=taxable_payment_total,
+        commuting_allowance=commuting_allowance,
+        year_month=detail.get("year_month"),
+        birth_date=employee.birth_date if employee else None,
+        dependents=amount_value(detail.get("dependents")),
+    )
+
+    pension = amount_value(detail.get("pension")) if "pension" in manual_deductions else auto_deductions["pension"]
+    health_insurance = (
+        amount_value(detail.get("health_insurance") or detail.get("insurance_fee"))
+        if "health_insurance" in manual_deductions or "insurance_fee" in manual_deductions
+        else auto_deductions["health_insurance"]
+    )
+    care_insurance = amount_value(detail.get("care_insurance")) if "care_insurance" in manual_deductions else auto_deductions["care_insurance"]
     resident_tax = int(detail.get("resident_tax") or 0)
     other_deduction = int(detail.get("other_deduction") or 0)
-    employment_insurance = detail.get("employment_insurance")
-    if employment_insurance is None:
-        employment_insurance = round(taxable_payment_total * float(detail.get("employment_insurance_rate") or EMPLOYMENT_INSURANCE_RATE))
-        detail["employment_insurance_auto"] = True
-    else:
-        employment_insurance = int(employment_insurance or 0)
+    if "employment_insurance" in manual_deductions:
+        employment_insurance = amount_value(detail.get("employment_insurance"))
         detail["employment_insurance_auto"] = False
+    else:
+        employment_insurance = auto_deductions["employment_insurance"]
+        detail["employment_insurance_auto"] = True
 
     social_insurance_total = pension + health_insurance + care_insurance + employment_insurance
-    income_tax = detail.get("income_tax")
-    if income_tax is None:
+    if "income_tax" in manual_deductions:
+        income_tax = amount_value(detail.get("income_tax"))
+        detail["income_tax_auto"] = False
+    else:
         income_tax = estimate_monthly_income_tax(taxable_payment_total, social_insurance_total)
         detail["income_tax_auto"] = True
-    else:
-        income_tax = int(income_tax or 0)
-        detail["income_tax_auto"] = False
 
     deduction_total = social_insurance_total + resident_tax + income_tax + other_deduction
     actual_salary_default = max(gross_payment_total - deduction_total, 0)
@@ -425,16 +478,19 @@ def enrich_payroll_detail(detail: dict) -> None:
             "health_insurance": health_insurance,
             "insurance_fee": health_insurance,
             "employment_insurance": employment_insurance,
+            "employment_insurance_rate": auto_deductions["employment_insurance_rate"],
             "income_tax": income_tax,
             "social_insurance_total": social_insurance_total,
             "taxable_payment_total": taxable_payment_total,
             "gross_payment_total": gross_payment_total,
             "deduction_total": deduction_total,
             "actual_salary_default": actual_salary_default,
+            "manual_deductions": sorted(manual_deductions),
+            "auto_deduction_detail": auto_deductions,
             "payment_items": payment_items,
             "deduction_items": deduction_items,
             "attendance_items": attendance_items,
-            "payroll_method": "v0.9_estimate_with_manual_override",
+            "payroll_method": "jp_2026_tokyo_standard_remuneration_with_manual_override",
         }
     )
 
@@ -444,6 +500,18 @@ def estimated_salary_for_employee(db: Session, employee_id: int, monthly_hours: 
     return int(detail["estimated_salary"]) if detail else None
 
 
+def effective_monthly_hours(db: Session, employee_id: int, year_month: str) -> float | None:
+    attendance_hours = monthly_work_hours(db, employee_id, year_month)
+    offboarding = salary_offboarding_for_month(db, employee_id, year_month)
+    if (
+        offboarding
+        and year_month == offboarding_final_month(offboarding)
+        and offboarding.final_salary_hours is not None
+    ):
+        return float(offboarding.final_salary_hours)
+    return attendance_hours
+
+
 def recalculate_salary_record(
     db: Session,
     record: SalaryRecord,
@@ -451,11 +519,11 @@ def recalculate_salary_record(
     reset_actual: bool = False,
     force: bool = False,
 ) -> SalaryRecord:
-    if record.locked and not force:
-        return record
-    attendance_hours = monthly_work_hours(db, record.employee_id, record.year_month)
+    attendance_hours = effective_monthly_hours(db, record.employee_id, record.year_month)
     if attendance_hours is not None:
         record.monthly_hours = attendance_hours
+    if record.locked and not force:
+        return record
     detail = salary_calculation_for_employee(
         db,
         record.employee_id,
@@ -492,8 +560,6 @@ def refresh_salary_record_for_employee(
     )
     if not record:
         return ensure_salary_record(db, employee, month)
-    if record.locked:
-        return record
 
     old_default_actual = (record.calculation_detail or {}).get("actual_salary_default")
     reset_payable = record.payable_salary is None or record.payable_salary == record.estimated_salary
@@ -503,10 +569,54 @@ def refresh_salary_record_for_employee(
     return recalculate_salary_record(db, record, reset_payable=reset_payable, reset_actual=reset_actual)
 
 
+def refresh_salary_records_for_employee(
+    db: Session,
+    employee_id: int,
+    months: set[str] | None = None,
+    include_current: bool = True,
+    enqueue_after_commit: bool = True,
+    reason: str | None = None,
+) -> dict:
+    target_months = set(months or [])
+    if months is None:
+        target_months.update(
+            db.scalars(select(SalaryRecord.year_month).where(SalaryRecord.employee_id == employee_id)).all()
+        )
+    if include_current:
+        target_months.add(current_year_month())
+
+    updated_months: list[str] = []
+    locked_months: list[str] = []
+    skipped_months: list[str] = []
+    for month in sorted(target_months):
+        record = refresh_salary_record_for_employee(db, employee_id, month)
+        if not record:
+            skipped_months.append(month)
+        elif record.locked:
+            locked_months.append(month)
+        else:
+            updated_months.append(month)
+    result = {
+        "employee_id": employee_id,
+        "updated_months": updated_months,
+        "locked_months": locked_months,
+        "skipped_months": skipped_months,
+    }
+    if enqueue_after_commit:
+        register_salary_refresh(
+            db,
+            employee_id,
+            months=months,
+            include_current=include_current,
+            reason=reason or "salary_dependency_changed",
+        )
+    return result
+
+
 def ensure_salary_record(db: Session, employee: Employee, year_month: str | None = None) -> SalaryRecord | None:
     month = year_month or current_year_month()
     sync_employee_annual_salary(db, employee)
-    attendance_hours = monthly_work_hours(db, employee.id, month)
+    attendance_hours = effective_monthly_hours(db, employee.id, month)
     detail = salary_calculation_for_employee(db, employee.id, monthly_hours=attendance_hours, year_month=month)
     if detail is None:
         return None
@@ -517,6 +627,7 @@ def ensure_salary_record(db: Session, employee: Employee, year_month: str | None
     )
     if record:
         if record.locked:
+            record.monthly_hours = attendance_hours
             return record
         record.monthly_hours = detail.get("monthly_hours", attendance_hours)
         recalculate_salary_record(db, record)
@@ -538,21 +649,42 @@ def ensure_salary_record(db: Session, employee: Employee, year_month: str | None
     return record
 
 
-def ensure_salary_records(db: Session, year_month: str | None = None) -> list[SalaryRecord]:
+def ensure_salary_records(
+    db: Session,
+    year_month: str | None = None,
+    enqueue_after_commit: bool = False,
+    reason: str | None = None,
+) -> list[SalaryRecord]:
     month = year_month or current_year_month()
     records: list[SalaryRecord] = []
-    for employee in db.scalars(select(Employee).where(Employee.is_deleted.is_(False)).order_by(Employee.full_name)).all():
+    employees = list(
+        db.scalars(select(Employee).where(Employee.is_deleted.is_(False)).order_by(Employee.full_name)).all()
+    )
+    for employee in employees:
         record = ensure_salary_record(db, employee, month)
         if record:
             records.append(record)
+        if enqueue_after_commit:
+            register_salary_refresh(
+                db,
+                employee.id,
+                months={month},
+                include_current=False,
+                reason=reason or "salary_dependency_changed",
+            )
     db.commit()
-    return list(
+    rows = list(
         db.scalars(
             select(SalaryRecord)
+            .join(Employee, Employee.id == SalaryRecord.employee_id)
             .where(SalaryRecord.year_month == month)
-            .order_by(SalaryRecord.employee_id)
+            .order_by(SalaryRecord.employee_id, SalaryRecord.updated_at.desc(), SalaryRecord.id.desc())
         ).all()
     )
+    latest_by_employee_month: dict[tuple[int, str], SalaryRecord] = {}
+    for record in rows:
+        latest_by_employee_month.setdefault((record.employee_id, record.year_month), record)
+    return sorted(latest_by_employee_month.values(), key=lambda record: record.employee_id)
 
 
 def salary_record_out(record: SalaryRecord) -> dict:
@@ -567,6 +699,8 @@ def salary_record_out(record: SalaryRecord) -> dict:
         "id": record.id,
         "employee_id": record.employee_id,
         "employee_name": record.employee.full_name if record.employee else None,
+        "employee_email": record.employee.email if record.employee else None,
+        "employee_is_deleted": bool(record.employee.is_deleted) if record.employee else False,
         "year_month": record.year_month,
         "monthly_hours": record.monthly_hours,
         "estimated_salary": record.estimated_salary,

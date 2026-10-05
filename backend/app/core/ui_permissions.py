@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.models import UiRolePermission
 
 
-UI_ROLES = ["admin", "hr", "pm", "employee", "partner"]
+UI_ROLES = ["admin", "soumu", "hr", "pm", "employee", "partner"]
 
 UI_ROUTE_KEYS = [
     "home",
@@ -36,11 +36,35 @@ UI_ROUTE_KEYS = [
     "projects",
     "settings.mail",
     "settings.permissions",
+    "settings.platform",
 ]
 
 
 DEFAULT_UI_PERMISSIONS: dict[str, set[str]] = {
     "admin": set(UI_ROUTE_KEYS),
+    "soumu": {
+        "home",
+        "employees.internal",
+        "employees.external",
+        "employees.offboarding",
+        "contracts.internal",
+        "contracts.external.new",
+        "contracts.external.partners",
+        "documents.purchase_orders",
+        "documents.quotations",
+        "documents.invoices",
+        "documents.history",
+        "documents.library",
+        "approvals.contracts",
+        "approvals.reimbursements",
+        "approvals.attendance",
+        "approvals.offboarding",
+        "reimbursements.claims",
+        "reimbursements.salaries",
+        "reimbursements.monthly_settlement",
+        "attendance.summary",
+        "attendance.requests",
+    },
     "hr": {
         "home",
         "employees.internal",

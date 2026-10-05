@@ -92,14 +92,27 @@ def salary_offboarding_for_month(db: Session, employee_id: int, year_month: str 
 
 
 def ensure_final_salary_record(db: Session, row: EmployeeOffboarding) -> SalaryRecord | None:
-    from app.services.salary import ensure_salary_record, refresh_salary_record_for_employee
+    from app.services.salary import ensure_salary_record, refresh_salary_records_for_employee
 
     employee = db.get(Employee, row.employee_id)
     if not employee:
         return None
-    record = refresh_salary_record_for_employee(db, employee.id, offboarding_final_month(row))
+    final_month = offboarding_final_month(row)
+    refresh_salary_records_for_employee(
+        db,
+        employee.id,
+        months={final_month},
+        include_current=False,
+        reason="offboarding_changed",
+    )
+    record = db.scalar(
+        select(SalaryRecord).where(
+            SalaryRecord.employee_id == employee.id,
+            SalaryRecord.year_month == final_month,
+        )
+    )
     if record is None:
-        record = ensure_salary_record(db, employee, offboarding_final_month(row))
+        record = ensure_salary_record(db, employee, final_month)
     return record
 
 
@@ -162,6 +175,15 @@ def approve_offboarding(db: Session, row: EmployeeOffboarding, approver: User) -
         execute_offboarding(db, row, approver)
     else:
         row.status = "scheduled"
+        db.flush()
+        attrs = dict(row.attributes or {})
+        record = ensure_final_salary_record(db, row)
+        if record and record.locked:
+            attrs["salary_locked_warning"] = "final salary is locked; automatic offboarding recalculation was skipped"
+        elif record:
+            attrs.pop("salary_locked_warning", None)
+            attrs["final_salary_record_id"] = record.id
+        row.attributes = attrs or None
     return row
 
 

@@ -8,16 +8,18 @@ from app.deps import get_current_user
 from app.models import Employee, EmployeeOffboarding, User, WorkflowRequest
 from app.schemas import EmployeeOffboardingCreate, EmployeeOffboardingOut, EmployeeOffboardingUpdate
 from app.services.offboarding import active_offboarding_for_employee, month_from_date, offboarding_out, snapshot_from_employee
+from app.services.salary import refresh_salary_records_for_employee
+from app.services.workflow import create_workflow_request
 
 router = APIRouter(prefix="/offboardings", tags=["offboardings"])
 
 
 def can_access_offboarding(user: User, row: EmployeeOffboarding) -> bool:
-    return user.role in {"admin", "hr"} or user.employee_id == row.employee_id
+    return user.role in {"admin", "soumu", "hr"} or user.employee_id == row.employee_id
 
 
 def target_employee(db: Session, payload: EmployeeOffboardingCreate, user: User) -> Employee:
-    employee_id = payload.employee_id if user.role in {"admin", "hr"} else user.employee_id
+    employee_id = payload.employee_id if user.role in {"admin", "soumu", "hr"} else user.employee_id
     if not employee_id:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="employee_id is required")
     employee = db.get(Employee, employee_id)
@@ -28,7 +30,7 @@ def target_employee(db: Session, payload: EmployeeOffboardingCreate, user: User)
 
 @router.get("", response_model=list[EmployeeOffboardingOut])
 def list_offboardings(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    if user.role in {"admin", "hr"}:
+    if user.role in {"admin", "soumu", "hr"}:
         rows = db.scalars(select(EmployeeOffboarding).order_by(EmployeeOffboarding.created_at.desc())).all()
     elif user.employee_id:
         rows = db.scalars(
@@ -47,7 +49,7 @@ def create_offboarding(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr", "pm", "employee"})
+    ensure_role(user, {"admin", "soumu", "hr", "pm", "employee"})
     employee = target_employee(db, payload, user)
     existing = active_offboarding_for_employee(db, employee.id)
     if existing:
@@ -78,16 +80,16 @@ def create_offboarding(
     )
     db.add(row)
     db.flush()
-    workflow = WorkflowRequest(
+    create_workflow_request(
+        db,
         workflow_type="employee_offboarding",
         entity_type="employee_offboarding",
         entity_id=row.id,
-        title=f"{row.full_name} offboarding",
-        status="pending",
+        title=f"退職申請: {row.full_name}",
         requester_id=user.id,
         attributes={"employee_id": employee.id, "related_user_ids": [user.id]},
+        link="/approvals/offboarding",
     )
-    db.add(workflow)
     db.commit()
     db.refresh(row)
     return offboarding_out(row)
@@ -114,12 +116,14 @@ def update_offboarding(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     row = db.get(EmployeeOffboarding, offboarding_id)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="offboarding not found")
     if row.status == "completed":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="completed offboarding cannot be edited")
+    previous_final_month = row.final_salary_month
+    previous_status = row.status
     updates = payload.model_dump(exclude_unset=True)
     if "resignation_date" in updates and "final_salary_month" not in updates:
         updates["final_salary_month"] = month_from_date(updates["resignation_date"])
@@ -138,6 +142,22 @@ def update_offboarding(
     if workflow and row.status in {"pending", "cancelled", "rejected"}:
         workflow.status = row.status
         workflow.comment = "updated by HR/Admin" if row.status != "pending" else workflow.comment
+    if previous_status in {"approved", "scheduled"} or row.status in {"approved", "scheduled"}:
+        db.flush()
+        sync = refresh_salary_records_for_employee(
+            db,
+            row.employee_id,
+            months={previous_final_month, row.final_salary_month},
+            include_current=False,
+            reason="offboarding_updated",
+        )
+        attrs = dict(row.attributes or {})
+        if sync["locked_months"]:
+            attrs["salary_locked_warning"] = f"給与がロックされています: {', '.join(sync['locked_months'])}"
+        else:
+            attrs.pop("salary_locked_warning", None)
+        attrs["salary_sync"] = sync
+        row.attributes = attrs
     db.commit()
     db.refresh(row)
     return offboarding_out(row)
@@ -154,7 +174,7 @@ def cancel_offboarding(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="offboarding not found")
     if row.status != "pending":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="only pending offboarding can be cancelled")
-    if user.role not in {"admin", "hr"} and user.employee_id != row.employee_id:
+    if user.role not in {"admin", "soumu", "hr"} and user.employee_id != row.employee_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="permission denied")
     row.status = "cancelled"
     workflow = db.scalar(

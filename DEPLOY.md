@@ -130,9 +130,26 @@ http://your-server/
 
 ## Upgrade
 
+Before upgrading, back up MySQL. Alembic runs automatically during backend startup and applies only revisions newer than the value stored in `alembic_version`:
+
+```bash
+mkdir -p /opt/nit-ao/backup
+docker compose --env-file /opt/nit-ao/config/app.env -f docker-compose.prod.yml exec -T mysql \
+  sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers "$MYSQL_DATABASE"' \
+  > /opt/nit-ao/backup/oa-$(date +%Y%m%d-%H%M%S).sql
+```
+
+MySQL DDL is not fully transactional. For an application rollback, first restore the previous backend/frontend image tags. Run `alembic downgrade` only after checking that the newer tables or columns do not contain business data that must be retained.
+
 ```bash
 docker compose --env-file /opt/nit-ao/config/app.env -f docker-compose.prod.yml build
 docker compose --env-file /opt/nit-ao/config/app.env -f docker-compose.prod.yml up -d
+```
+
+Check the active schema revision after the backend is healthy:
+
+```bash
+docker compose --env-file /opt/nit-ao/config/app.env -f docker-compose.prod.yml exec backend alembic current
 ```
 
 ## Deploy With ECR Images

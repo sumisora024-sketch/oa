@@ -17,6 +17,9 @@ class Settings(BaseSettings):
 
     database_url: str = "mysql+pymysql://admin:admin123@127.0.0.1:3306/oa"
     redis_url: str = "redis://127.0.0.1:6379/0"
+    celery_broker_url: str = ""
+    celery_result_backend: str = ""
+    embedded_scheduler_enabled: bool = False
 
     app_admin_email: str = "admin@example.com"
     app_admin_password: str = "admin123"

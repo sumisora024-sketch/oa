@@ -5,6 +5,7 @@ from app.models import Employee, User
 
 ROLE_LABELS = {
     "admin": "Admin",
+    "soumu": "総務",
     "hr": "HR",
     "pm": "PM/营业",
     "employee": "一般员工",
@@ -23,6 +24,17 @@ MODULE_PERMISSIONS: dict[str, dict[str, set[str]]] = {
         "external_personnel": {"read", "create", "update", "delete", "confirm", "download"},
         "projects": {"read", "create", "update", "delete", "recommend"},
         "attendance": {"read", "create", "update", "approve", "settings"},
+    },
+    "soumu": {
+        "employees": {"read", "update", "import"},
+        "contracts": {"read", "create", "update", "delete", "import"},
+        "external_contracts": {"read", "create", "update", "generate", "upload", "download", "settle"},
+        "approvals": {"read", "approve"},
+        "reimbursements": {"read", "create", "update", "delete", "approve", "download"},
+        "subcontracting": set(),
+        "external_personnel": {"read", "update", "confirm", "download"},
+        "projects": set(),
+        "attendance": {"read", "create", "update", "approve"},
     },
     "hr": {
         "employees": {"read", "update", "import"},
@@ -83,12 +95,12 @@ def ensure_role(user: User, roles: set[str]) -> None:
 
 
 def can_read_employee(user: User, employee: Employee) -> bool:
-    if user.role in {"admin", "hr", "pm"}:
+    if user.role in {"admin", "soumu", "hr", "pm"}:
         return True
     return user.employee_id == employee.id
 
 
 def can_update_employee(user: User, employee: Employee) -> bool:
-    if user.role in {"admin", "hr"}:
+    if user.role in {"admin", "soumu", "hr"}:
         return True
     return user.employee_id == employee.id

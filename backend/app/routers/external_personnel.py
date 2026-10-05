@@ -25,7 +25,7 @@ def ensure_personnel_dir() -> None:
 
 
 def ensure_internal_personnel_user(user: User) -> None:
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
 
 
 def personnel_file_url(row_id: int, kind: str, path: str | None) -> str | None:
@@ -54,7 +54,7 @@ def personnel_out(row: ExternalPersonnel) -> dict:
 
 
 def can_access_personnel(user: User, row: ExternalPersonnel) -> bool:
-    if user.role in {"admin", "hr"}:
+    if user.role in {"admin", "soumu", "hr"}:
         return True
     return user.role == "partner" and user.partner_id == row.partner_id
 
@@ -116,7 +116,7 @@ def list_external_personnel(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in {"admin", "hr", "partner"}:
+    if user.role not in {"admin", "soumu", "hr", "partner"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="permission denied")
     stmt = select(ExternalPersonnel).where(ExternalPersonnel.status != "deleted").order_by(ExternalPersonnel.created_at.desc())
     if user.role == "partner":
@@ -141,7 +141,7 @@ def create_external_personnel(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if user.role not in {"admin", "hr", "partner"}:
+    if user.role not in {"admin", "soumu", "hr", "partner"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="permission denied")
     partner = get_partner_for_submit(db, user, partner_id)
     if user.role == "partner" and not has_approved_partner_quotation(db, partner.id, assignment_month):

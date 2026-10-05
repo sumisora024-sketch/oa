@@ -21,7 +21,7 @@ const formRef = ref(null)
 const uploadFiles = ref([])
 const form = reactive(defaultForm())
 
-const isManager = computed(() => ['admin', 'hr'].includes(auth.user?.role))
+const isManager = computed(() => ['admin', 'soumu', 'hr'].includes(auth.user?.role))
 const expenseTypeOptions = ['交通費', '出張費', '懇親会費', 'その他']
 const statusOptions = ['pending', 'approved', 'rejected']
 const { pager, pageRows } = usePagination(rows)

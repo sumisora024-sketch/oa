@@ -39,6 +39,8 @@ const settlement = ref(null)
 const q = ref('')
 const salaryMonth = ref(currentMonth())
 const quotationId = ref(null)
+const invoiceCreationMode = ref('quotation')
+const invoiceSubmitting = ref(false)
 const uploadUseExisting = ref(false)
 
 const partnerDialog = ref(false)
@@ -51,6 +53,7 @@ const partnerFormRef = ref(null)
 const contractFormRef = ref(null)
 const uploadFormRef = ref(null)
 const quotationFormRef = ref(null)
+const manualInvoiceFormRef = ref(null)
 
 const partnerForm = reactive({
   company_name: '',
@@ -106,6 +109,21 @@ const docForm = reactive({
   workplace: ''
 })
 
+const manualInvoiceForm = reactive({
+  partner_id: null,
+  external_contract_id: null,
+  target_month: currentMonth(),
+  issue_date: today(),
+  due_date: '',
+  item_name: 'SES作業費',
+  quantity: 1,
+  unit_price: 0,
+  note: '',
+  work_period: '',
+  base_hours: '140時間-180時間',
+  workplace: ''
+})
+
 const partnerOptions = computed(() => partners.value.map((partner) => ({
   label: `${partner.company_name} / ${partnerTypeLabel(partner.partner_type)}`,
   value: partner.id,
@@ -124,6 +142,8 @@ const quotationDocuments = computed(() => documents.value.filter((doc) => (
 const selectedQuotation = computed(() => documents.value.find((doc) => doc.id === quotationId.value) || null)
 const selectedQuotationPartner = computed(() => partners.value.find((partner) => partner.id === selectedQuotation.value?.partner_id) || null)
 const canGenerateInvoice = computed(() => ['upstream', 'both'].includes(selectedQuotationPartner.value?.partner_type))
+const selectedManualInvoicePartner = computed(() => partners.value.find((partner) => partner.id === manualInvoiceForm.partner_id) || null)
+const canGenerateManualInvoice = computed(() => ['upstream', 'both'].includes(selectedManualInvoicePartner.value?.partner_type))
 const isAdmin = computed(() => auth.user?.role === 'admin')
 const canEditSettlement = computed(() => isAdmin.value)
 const hasBatchActions = computed(() => ['contracts', 'partners', 'documents'].includes(activeTab.value))
@@ -450,6 +470,28 @@ function documentPayload(kind = 'manual') {
   }
 }
 
+function manualInvoicePayload() {
+  return {
+    partner_id: manualInvoiceForm.partner_id,
+    external_contract_id: manualInvoiceForm.external_contract_id || null,
+    source_document_id: null,
+    target_month: manualInvoiceForm.target_month,
+    issue_date: manualInvoiceForm.issue_date,
+    due_date: manualInvoiceForm.due_date || null,
+    items: [{
+      name: manualInvoiceForm.item_name.trim(),
+      quantity: manualInvoiceForm.quantity,
+      unit_price: manualInvoiceForm.unit_price
+    }],
+    note: blankToNull(manualInvoiceForm.note),
+    attributes: {
+      work_period: manualInvoiceForm.work_period || manualInvoiceForm.target_month,
+      base_hours: manualInvoiceForm.base_hours,
+      workplace: manualInvoiceForm.workplace
+    }
+  }
+}
+
 async function loadAll() {
   await Promise.all([loadPartners(), loadContracts(), loadDocuments(), loadApprovedPartnerQuotations()])
 }
@@ -631,6 +673,7 @@ async function generateQuotation() {
 }
 
 async function generateInvoice() {
+  if (invoiceSubmitting.value) return
   try {
     if (!quotationId.value) {
       ElMessage.error('見積書を選択してください')
@@ -640,12 +683,35 @@ async function generateInvoice() {
       ElMessage.error('請求書は上流会社、または上流・協力会社のみ作成できます')
       return
     }
+    invoiceSubmitting.value = true
     const { data } = await api.post(`/external/invoices/from-quotation/${quotationId.value}`)
     ElMessage.success('請求書を作成しました')
     await loadDocuments()
     download(data.download_url)
   } catch (error) {
     if (error?.response) showApiError(error)
+  } finally {
+    invoiceSubmitting.value = false
+  }
+}
+
+async function generateManualInvoice() {
+  if (invoiceSubmitting.value) return
+  try {
+    await manualInvoiceFormRef.value?.validate()
+    if (!canGenerateManualInvoice.value) {
+      ElMessage.error('請求書は上流会社、または上流・協力会社のみ作成できます')
+      return
+    }
+    invoiceSubmitting.value = true
+    const { data } = await api.post('/external/invoices', manualInvoicePayload())
+    ElMessage.success('請求書を作成しました')
+    await loadDocuments()
+    download(data.download_url)
+  } catch (error) {
+    if (error?.response) showApiError(error)
+  } finally {
+    invoiceSubmitting.value = false
   }
 }
 
@@ -913,12 +979,43 @@ watch(() => route.name, syncTabFromRoute)
 
       <el-tab-pane v-if="activeTab === 'invoice'" label="請求書作成" name="invoice">
         <section class="settings-panel">
-          <h3>見積書から請求書を作成</h3>
-          <div class="toolbar">
-            <el-select v-model="quotationId" filterable placeholder="見積書を選択" style="width: 380px">
-              <el-option v-for="doc in quotationDocuments" :key="doc.id" :label="`${doc.document_no} / ${doc.partner_name} / ${money(doc.total)}`" :value="doc.id" />
-            </el-select>
-            <el-button type="warning" :icon="FileText" :disabled="!selectedQuotation || !canGenerateInvoice" @click="generateInvoice">請求書作成</el-button>
+          <el-radio-group v-model="invoiceCreationMode" class="creation-mode-switch">
+            <el-radio-button value="quotation">見積書から作成</el-radio-button>
+            <el-radio-button value="manual">手動作成</el-radio-button>
+          </el-radio-group>
+
+          <div v-if="invoiceCreationMode === 'quotation'" class="creation-mode-content">
+            <h3>見積書から請求書を作成</h3>
+            <div class="toolbar">
+              <el-select v-model="quotationId" filterable placeholder="見積書を選択" style="width: 380px">
+                <el-option v-for="doc in quotationDocuments" :key="doc.id" :label="`${doc.document_no} / ${doc.partner_name} / ${money(doc.total)}`" :value="doc.id" />
+              </el-select>
+              <el-button type="warning" :icon="FileText" :loading="invoiceSubmitting" :disabled="!selectedQuotation || !canGenerateInvoice" @click="generateInvoice">請求書作成</el-button>
+            </div>
+          </div>
+
+          <div v-else class="creation-mode-content">
+            <h3>請求書を手動作成</h3>
+            <el-form ref="manualInvoiceFormRef" :model="manualInvoiceForm" :rules="documentRules" label-position="top" class="form-grid">
+              <el-form-item label="会社名" prop="partner_id">
+                <el-select v-model="manualInvoiceForm.partner_id" filterable>
+                  <el-option v-for="partner in upstreamPartners" :key="partner.value" :label="partner.label" :value="partner.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="対象年月" prop="target_month"><el-date-picker v-model="manualInvoiceForm.target_month" type="month" value-format="YYYY-MM" /></el-form-item>
+              <el-form-item label="発行日" prop="issue_date"><el-date-picker v-model="manualInvoiceForm.issue_date" value-format="YYYY-MM-DD" /></el-form-item>
+              <el-form-item label="支払期限"><el-date-picker v-model="manualInvoiceForm.due_date" value-format="YYYY-MM-DD" /></el-form-item>
+              <el-form-item label="項目" prop="item_name"><el-input v-model="manualInvoiceForm.item_name" /></el-form-item>
+              <el-form-item label="数量" prop="quantity"><el-input-number v-model="manualInvoiceForm.quantity" :min="0" :controls="false" /></el-form-item>
+              <el-form-item label="単価" prop="unit_price"><el-input-number v-model="manualInvoiceForm.unit_price" :min="0" :controls="false" /></el-form-item>
+              <el-form-item label="作業場所"><el-input v-model="manualInvoiceForm.workplace" /></el-form-item>
+              <el-form-item label="基準時間幅"><el-input v-model="manualInvoiceForm.base_hours" /></el-form-item>
+              <el-form-item label="備考" class="span-2"><el-input v-model="manualInvoiceForm.note" type="textarea" :rows="2" /></el-form-item>
+            </el-form>
+            <p class="muted">見積書を経由せず、入力内容から請求書を作成します。</p>
+            <div class="toolbar">
+              <el-button type="warning" :icon="FileText" :loading="invoiceSubmitting" :disabled="!canGenerateManualInvoice" @click="generateManualInvoice">請求書作成</el-button>
+            </div>
           </div>
         </section>
       </el-tab-pane>
@@ -1085,6 +1182,14 @@ watch(() => route.name, syncTabFromRoute)
 
 .settings-panel {
   max-width: 980px;
+}
+
+.creation-mode-switch {
+  margin-bottom: 20px;
+}
+
+.creation-mode-content {
+  padding-top: 4px;
 }
 
 .settlement-detail-panel {

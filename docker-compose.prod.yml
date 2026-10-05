@@ -55,6 +55,57 @@ services:
     expose:
       - "8000"
 
+  celery-worker:
+    image: ${BACKEND_IMAGE:-japan-nit-oa-backend}:${BACKEND_IMAGE_TAG:-${APP_VERSION:-0.8}}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    command: celery -A app.celery_app.celery_app worker --loglevel=INFO
+    env_file:
+      - ${NIT_OA_CONFIG_DIR:-/opt/nit-ao/config}/app.env
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-admin}:${MYSQL_PASSWORD:-change-admin-password}@mysql:3306/${MYSQL_DATABASE:-oa}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+      EMBEDDED_SCHEDULER_ENABLED: "false"
+      TZ: Asia/Tokyo
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ${NIT_OA_ROOT:-/opt/nit-ao}/storage:/app/backend/storage
+      - ${NIT_OA_ROOT:-/opt/nit-ao}/refer:/app/refer:ro
+
+  celery-beat:
+    image: ${BACKEND_IMAGE:-japan-nit-oa-backend}:${BACKEND_IMAGE_TAG:-${APP_VERSION:-0.8}}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    command: celery -A app.celery_app.celery_app beat --loglevel=INFO --schedule /tmp/celerybeat-schedule
+    env_file:
+      - ${NIT_OA_CONFIG_DIR:-/opt/nit-ao/config}/app.env
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-admin}:${MYSQL_PASSWORD:-change-admin-password}@mysql:3306/${MYSQL_DATABASE:-oa}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
+      EMBEDDED_SCHEDULER_ENABLED: "false"
+      TZ: Asia/Tokyo
+    depends_on:
+      celery-worker:
+        condition: service_started
+
   frontend:
     image: ${FRONTEND_IMAGE:-japan-nit-oa-frontend}:${FRONTEND_IMAGE_TAG:-${APP_VERSION:-0.8}}
     build:

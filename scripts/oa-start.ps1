@@ -8,6 +8,10 @@ $backendLog = Join-Path $backendDir "backend.log"
 $backendErrLog = Join-Path $backendDir "backend.err.log"
 $frontendLog = Join-Path $frontendDir "frontend.log"
 $frontendErrLog = Join-Path $frontendDir "frontend.err.log"
+$celeryWorkerLog = Join-Path $backendDir "celery-worker.log"
+$celeryWorkerErrLog = Join-Path $backendDir "celery-worker.err.log"
+$celeryBeatLog = Join-Path $backendDir "celery-beat.log"
+$celeryBeatErrLog = Join-Path $backendDir "celery-beat.err.log"
 
 if (!(Test-Path $backendPython)) {
     throw "Backend virtualenv python was not found: $backendPython"
@@ -80,6 +84,26 @@ Start-Process `
     -RedirectStandardOutput $frontendLog `
     -RedirectStandardError $frontendErrLog
 
+$celeryWorker = Start-Process `
+    -FilePath $backendPython `
+    -ArgumentList @("-m", "celery", "-A", "app.celery_app.celery_app", "worker", "--loglevel=INFO", "--pool=solo") `
+    -WorkingDirectory $backendDir `
+    -WindowStyle Hidden `
+    -PassThru `
+    -RedirectStandardOutput $celeryWorkerLog `
+    -RedirectStandardError $celeryWorkerErrLog
+$celeryWorker.Id | Set-Content (Join-Path $backendDir "celery-worker.pid")
+
+$celeryBeat = Start-Process `
+    -FilePath $backendPython `
+    -ArgumentList @("-m", "celery", "-A", "app.celery_app.celery_app", "beat", "--loglevel=INFO", "--schedule", "celerybeat-schedule") `
+    -WorkingDirectory $backendDir `
+    -WindowStyle Hidden `
+    -PassThru `
+    -RedirectStandardOutput $celeryBeatLog `
+    -RedirectStandardError $celeryBeatErrLog
+$celeryBeat.Id | Set-Content (Join-Path $backendDir "celery-beat.pid")
+
 function Wait-HttpOk {
     param(
         [string]$Url,
@@ -111,3 +135,5 @@ Write-Host "  $backendLog"
 Write-Host "  $backendErrLog"
 Write-Host "  $frontendLog"
 Write-Host "  $frontendErrLog"
+Write-Host "  $celeryWorkerLog"
+Write-Host "  $celeryBeatLog"

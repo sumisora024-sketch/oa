@@ -13,6 +13,7 @@ from app.db import get_db
 from app.deps import get_current_user
 from app.models import DocumentArchive, ExternalDocument, ExternalPersonnel, PartnerOnboardingItem, Reimbursement, User
 from app.routers.external import document_deleted, public_document_url
+from app.services.document_access import can_access_archive
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -324,13 +325,12 @@ def list_managed_documents(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin"})
     sync_document_archives(db)
     db.commit()
     stmt = select(DocumentArchive).where(DocumentArchive.hidden == False, DocumentArchive.missing == False).order_by(DocumentArchive.created_at.desc())  # noqa: E712
     if document_type:
         stmt = stmt.where(DocumentArchive.document_type == document_type)
-    rows = [archive_item(row) for row in db.scalars(stmt).all()]
+    rows = [archive_item(row) for row in db.scalars(stmt).all() if can_access_archive(db, user, row)]
     if document_type:
         rows = [row for row in rows if row["document_type"] == document_type]
     if q:
@@ -349,10 +349,11 @@ def download_archive_document(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin"})
     row = db.get(DocumentArchive, archive_id)
     if not row or row.hidden or not row.storage_path:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+    if not can_access_archive(db, user, row):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="閲覧権限がありません")
     path = Path(row.storage_path)
     if not path.exists() or not path.is_file():
         row.missing = True

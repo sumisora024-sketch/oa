@@ -16,6 +16,8 @@ RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
 COPY backend/app ./app
+COPY backend/alembic.ini ./alembic.ini
+COPY backend/alembic ./alembic
 COPY refer /app/refer
 
 RUN mkdir -p /app/backend/storage

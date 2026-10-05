@@ -48,7 +48,7 @@ router = APIRouter(prefix="/external", tags=["external_contracts"])
 
 
 def ensure_external_user(user: User) -> None:
-    ensure_role(user, {"admin", "pm"})
+    ensure_role(user, {"admin", "soumu", "pm"})
 
 
 def partner_contract_end_date(partner: BusinessPartner) -> date | None:
@@ -938,6 +938,33 @@ def generate_invoice_from_quotation(
     db.commit()
     db.refresh(invoice)
     return document_out(invoice)
+
+
+@router.post("/invoices", response_model=ExternalDocumentOut)
+def generate_invoice(
+    payload: ExternalDocumentGenerateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ensure_external_user(user)
+    partner = get_partner_or_404(db, payload.partner_id)
+    ensure_partner_direction(partner, {"upstream"}, "請求書")
+    if not payload.items:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="明細を1件以上入力してください")
+    attributes = {
+        **(payload.attributes or {}),
+        "bank_info": partner.bank_info or {},
+        "creation_mode": "manual",
+    }
+    document = make_document(
+        db,
+        payload.model_copy(update={"attributes": attributes}),
+        "invoice",
+        "upstream",
+        "NKK",
+        user,
+    )
+    return document_out(document)
 
 
 @router.get("/settlements/{year_month}", response_model=MonthlySettlementOut)

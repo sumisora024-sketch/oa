@@ -279,6 +279,27 @@ v0.9 UI 導線・権限管理 追記
     id PK；role unique；route_keys JSON；updated_by FK -> users.id；created_at；updated_at。
     説明：この表は前端のメニューとルート表示のみを制御する。API の実操作権限は既存 MODULE_PERMISSIONS と各 router の ensure_role/ensure_permission で保護する。admin は安全のため常に全 UI route を持ち、権限管理画面から削除できない。
 
+v1.1 給与計算・非同期ジョブ 追記
+
+1. 給与計算エンジン
+    backend/app/services/payroll_engine.py に日本給与控除の計算ロジックを分離する。
+    計算モデルは kyuyo.net の支給/控除/差引構成を参考に、支給項目、控除項目、差引支給額を calculation_detail に保存する。
+    健康保険、厚生年金、介護保険は標準報酬月額ベースで概算計算する。デフォルトは協会けんぽ東京、令和8年度料率、扶養0人、一般事業の雇用保険とする。
+    健康保険には令和8年度の子ども・子育て支援金率を含める。介護保険は birth_date から 40-64 歳を判定し対象者のみ計算する。
+    厚生年金は標準報酬月額の被保険者負担分で計算する。住民税は給与月額のみから正確に推定できないため、HR/admin の手動入力を標準とする。
+    HR/admin が健康保険、介護保険、厚生年金、雇用保険、所得税を手動変更した場合、calculation_detail.manual_deductions に記録し、自動再計算ではその項目を上書きしない。
+    locked=true の salary_records は勤怠、案件归属、経費承認、退職処理などの自動再計算対象外とし、変更が必要な場合は解除後に再計算/再保存する。
+
+2. 給与明細 PDF
+    給与明細 PDF は常に現在の salary_records と calculation_detail から生成する。
+    ダウンロード URL は updated_at を付与し、API レスポンスは Cache-Control no-store を返す。HR が給与修正後にロックした場合でも、一般社員が古い PDF キャッシュを取得しないようにする。
+
+3. Celery ジョブ
+    FastAPI startup 内の常駐ループを production の主経路から外し、Celery worker/beat に移行する。
+    celery-worker：Redis broker からジョブを受け取り、メール取込、契約期限通知、退職予定処理、当月給与レコード作成を実行する。
+    celery-beat：Asia/Tokyo でスケジュールを管理する。メール取込は毎分、契約期限通知は毎日 09:00、退職予定処理は毎時 05 分、当月給与レコード作成は毎日 01:20。
+    各ジョブは Redis ロックを使用し、同一ジョブの重複実行を避ける。将来 job_runs テーブルを追加する場合、実行履歴、エラー、処理件数を永続化する。
+
     初期 route key：
         home。
         employees.internal / employees.external。
@@ -289,3 +310,105 @@ v0.9 UI 導線・権限管理 追記
         subcontracting.notice / subcontracting.quotations / subcontracting.invoices / subcontracting.personnel。
         attendance.summary / attendance.requests / attendance.settings。
         projects / settings.mail / settings.permissions。
+
+v1.1 第一批基础修正
+
+1. 接口调整
+    GET /api/employees/me：读取当前登录账号绑定的内部员工资料。
+    PATCH /api/employees/me：本人修改电话、最寄駅、语学力、资格、技术经历、IT 经验年数、人才分类与技能。法定姓名、邮箱、住址等正式身份资料暂不走直接修改，后续接公共审批流。
+    POST /api/contracts：保留内部契约手工录入；前端仅向 admin 展示入口。
+    PUT /api/contracts/{contract_id}：修改人员、契约类型、契约公司、起止日期、基本给、工时段、手当、工作场所、业务内容和 PDF 解析文本；PDF 解析文本仅 admin 可修改。改绑人员或修改工资元数据时，同时刷新受影响员工的未锁定工资。
+    GET /api/contracts/{contract_id}/pdf/download：下载以后新导入并持久化保存的原始内部契约 PDF；响应禁止浏览器缓存并记录下载审计。
+    审批驳回：契约/经费/退职工作流、勤怠和外部人员确认在 rejected 时必须填写理由，前后端同时校验。
+    写接口幂等：前端对进行中的相同请求防重复提交，并发送 Idempotency-Key；后端使用 Redis 快速锁和 idempotency_records 持久记录双重判断。
+
+2. 数据库设计
+    contracts 新增 pdf_path VARCHAR(1024) NULL：保存内部契约原始 PDF 的服务端路径。pdf_filename 仍保存用户上传时的原文件名。历史记录只有 pdf_filename 而无 pdf_path 时不提供伪下载链接。
+    idempotency_records：关键写请求的持久幂等记录表。
+        id PK；actor_key；method；path；idempotency_key；status(processing/completed)；status_code；expires_at；created_at；updated_at。
+        唯一约束：actor_key + method + path + idempotency_key。处理失败会释放记录，成功记录默认保留 24 小时。
+    audit_logs：除成功写接口外，内部契约 PDF、工资 PDF 和统一书类下载等 GET 下载操作也写入 action=download 审计记录；敏感请求字段继续脱敏。
+
+3. Schema 迁移与字符集
+    使用 Alembic 管理数据库版本。0001_baseline 原地接管已有数据库且不删除业务表；0002_first_batch 仅在缺失时新增 contracts.pdf_path 和 idempotency_records。
+    应用启动顺序为 alembic upgrade head 后执行基础账号/样例数据初始化，不再依靠启动时反复 ALTER TABLE 或重建业务表。
+    MySQL 客户端连接显式使用 utf8mb4；生产 MySQL 数据库继续使用 utf8mb4 / utf8mb4_unicode_ci，业务枚举保存日文标准值。
+
+v1.2 共通機能・第二批
+
+1. 接口文档
+    GET /api/notifications：返回当前登录用户的站内通知；支持 unread_only 和 limit。
+    GET /api/notifications/unread-count：返回未读数量。
+    PATCH /api/notifications/{notification_id}/read：标记单条通知已读。
+    POST /api/notifications/read-all：全部标记已读。
+    GET /api/platform/config：admin 获取通知规则、审批流、文档权限、角色和可指定用户。
+    PUT /api/platform/event-rules/{event_code}：admin 修改事件开关、通知渠道、通知角色、指定通知人和通知日程。
+    PUT /api/platform/workflows/{workflow_type}：admin 修改审批步骤。每个步骤可指定一个或多个角色和人员；任意一个匹配人员审批后进入下一步。
+    PUT /api/platform/document-policies/{document_type}：admin 修改文档角色、本人和关联人员访问策略。
+    GET /api/employees/me/change-requests：查询本人的正式资料变更申请历史。
+    POST /api/employees/me/change-requests：提交姓名、假名、出生日期、毕业状态、住址、邮箱、国籍变更；审批完成前不修改 employees。
+    GET/POST /api/approvals：现有三方見積書、三方請求書、报销、离职与个人资料变更统一使用 workflow_definitions；申请创建时复制审批步骤和版本到 workflow_requests.attributes._workflow，后续修改配置不影响处理中记录。
+
+2. 数据库设计
+    notification_rules：通知事件定义表。
+        id PK；event_code unique；display_name；enabled；channels JSON；recipient_roles JSON；recipient_user_ids JSON；include_related；schedule JSON；updated_by FK -> users.id；created_at；updated_at。
+    notifications：站内和邮件通知投递表。
+        id PK；event_key + recipient_key unique；event_code；user_id FK -> users.id；recipient_email；title；message；link；visible_in_app；is_read；read_at；email_status；email_attempts；email_error；emailed_at；attributes JSON；created_at。
+        Celery beat 每分钟触发 dispatch_notifications，worker 负责 SMTP 投递；event_key 保证同一业务事件不会重复生成同一收件人的通知。
+    workflow_definitions：可配置审批流定义表。
+        id PK；workflow_type unique；display_name；enabled；steps JSON；version；updated_by FK -> users.id；created_at；updated_at。
+        workflow_requests 继续作为实例和历史表，不新增业务模块专用审批表。_workflow.history 保留每一步审批人、时间、结果和理由；拒绝记录不会覆盖或删除。
+    document_access_policies：全书类访问策略表。
+        id PK；document_type unique；display_name；allowed_roles JSON；owner_access；related_access；updated_by FK -> users.id；created_at；updated_at。
+        /api/documents 列表与下载接口同时执行后端策略检查，前端菜单权限不作为数据安全边界。
+    users.role 新增 soumu，人员类型新增 総務。soumu 是独立角色，不与 hr 合并；默认具备人员、内部契约、报销、勤怠、外部人员及审批相关业务权限，但不能进入 admin 公共能力控制台。
+
+3. Schema 迁移
+    0003_public_capabilities 仅新增 notification_rules、notifications、workflow_definitions、document_access_policies 四张表，不删除或重建已有业务表。
+    后端容器启动时先执行 alembic upgrade head，再初始化缺失的默认规则。MySQL DDL 不保证事务回滚，生产升级前必须备份；应用回滚优先切回旧镜像，数据库 downgrade 只在确认新表无有效业务数据后执行。
+
+4. 文件与印章
+    电子章源文件为 backend/tmp/pdfs/Image.png，发布资源整理为 refer/nit_stamp.png。PDF 先生成正文，印章以透明 PNG 在最上层绘制，不修改底层模板；生产镜像通过 COPY refer /app/refer 携带该资源。
+
+v1.2.1 給与連携修正
+
+1. 即時連携
+    契約の基本給、手当、期間、対象社員を変更した場合、対象社員の既存給与月と当月を再計算する。給与月の契約判定は現在日ではなく、その給与月と契約期間の重なりで行う。
+    案件への配属、再配属、配属解除、案件削除は対象社員の給与を再計算する。過去月は salary_records.calculation_detail.project_assigned の確定済みスナップショットを優先し、現在の配属状態で過去給与を意図せず変更しない。
+    勤怠工数は給与ロック中でも salary_records.monthly_hours に同期する。ただし給与額、控除、差引支給額は再計算しない。退職最終月に手動工数がある場合はその値を優先する。
+    退職最終給与月、最終月工数、状態の変更、および退職承認の撤回は対象給与月を再計算する。生年月日の変更・承認・撤回も介護保険判定のため給与を再計算する。
+
+2. ロック
+    契約、案件、退職、生年月日、勤怠、経費の変更先に locked=true の給与がある場合、金額を変更せず locked_months と警告を返す。契約、案件、社員画面は警告を表示する。勤怠画面は給与ロック列、経費・退職は申請 attributes.salary_locked_warning で確認する。
+    月次精算 locked=true は確定スナップショットとして保持し、元の給与・請求書・パートナー請求書が後から変わっても自動更新しない。変更する場合は月次精算のロック解除を必須とする。
+
+3. 非同期処理
+    メール取込、通知メール送信、契約期限通知、予定退職処理、当月給与レコード作成は Celery worker/beat を使用する。ユーザー操作直後に画面へ反映すべき契約・案件・勤怠・経費承認の給与再計算は同期処理を維持する。
+    Celery worker と beat は backend イメージを再利用するため、HTTP 8000 のイメージ healthcheck を Compose で無効化する。ジョブ実行自体は Redis 分散ロックで重複を防止する。
+
+v1.2.2 給与メタデータ依存・非同期整合性
+
+1. 給与の入力元
+    社員：生年月日（介護保険対象判定）、退職状態、年収見込の手動設定。
+    内部契約：対象社員、契約期間、基本給、手当一覧・手当合計。給与対象月と契約期間が重なる契約を使用する。
+    案件配属：配属中の場合は契約手当を支給し、未配属の場合は基本給のみとする。過去月は給与明細に保存した配属スナップショットを優先する。
+    勤怠：勤務カレンダー、所定勤務時間、休憩、休暇設定、承認済み勤怠申請から月間工数を算出する。月間工数は給与画面から直接変更しない。
+    経費：承認済み、かつ支給月が対象給与月と一致する経費合計を非課税支給として加算する。承認撤回時は除外する。
+    退職：承認済み・予定・完了の退職情報、最終給与月、最終月工数、最終給与手動額を優先する。
+    給与明細：時間帯、住民税、通勤手当、その他支給・控除、各保険と税の手動上書き、実支給額、ロック状態を保持する。
+
+2. 連携順序
+    契約・案件・勤怠・経費承認・退職・生年月日・給与明細を更新した API は、同一トランザクション内で給与を即時再計算する。
+    SQLAlchemy の autoflush=false を考慮し、承認状態・配属状態・削除状態を条件検索する前に明示的に flush する。
+    トランザクションが commit された場合だけ Celery の refresh_employee_salaries を送信する。rollback 時はイベントを破棄する。
+    同一トランザクション内の同一社員イベントは社員単位で統合する。Celery は社員単位の Redis ロック、最大 5 回のリトライ、冪等な再計算により最終整合性を確認する。
+    給与更新後、未ロックの既存月次精算があれば実支給額合計と収支を再計算する。給与または月次精算がロック済みの場合は確定値を維持する。
+
+3. 更新イベント
+    contract_created / contract_imported / contract_updated / contract_deleted。
+    project_assignment_created / project_assignment_updated / project_assignment_removed / project_deleted。
+    attendance_changed / attendance_settings_changed / work_calendar_imported / work_calendar_day_changed。
+    reimbursement_approval_changed / reimbursement_approval_withdrawn。
+    offboarding_changed / offboarding_updated / offboarding_approval_withdrawn。
+    employee_birth_date_changed / employee_birth_date_imported / employee_profile_birth_date_approved / employee_profile_birth_date_withdrawn。
+    salary_record_updated。

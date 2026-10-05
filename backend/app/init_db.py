@@ -8,16 +8,16 @@ from app.core.security import get_password_hash
 from app.db import Base, engine
 from app.models import Contract, Employee, Project, User
 from app.services.pdf_parser import parse_contract_attributes
+from app.services.public_capabilities import ensure_public_capability_defaults
 from app.services.salary import sync_employee_annual_salary
 
 
 def init_db() -> None:
-    Base.metadata.create_all(bind=engine)
-    ensure_schema_columns()
     db = Session(engine)
     try:
         seed_admin(db)
         seed_sample_data(db)
+        ensure_public_capability_defaults(db)
         ensure_employee_login(db, "吴臻清", "employee")
         normalize_existing_data(db)
         db.commit()
@@ -73,6 +73,13 @@ def ensure_schema_columns() -> None:
                 conn.execute(text("ALTER TABLE salary_records ADD COLUMN reimbursement_amount INT NOT NULL DEFAULT 0"))
             if "locked" not in salary_columns:
                 conn.execute(text("ALTER TABLE salary_records ADD COLUMN locked BOOL NOT NULL DEFAULT 0"))
+            salary_indexes = {index["name"] for index in inspector.get_indexes("salary_records")}
+            ym_column = "`year_month`" if engine.dialect.name == "mysql" else "year_month"
+            duplicate_salary = conn.execute(
+                text(f"SELECT employee_id, {ym_column}, COUNT(*) c FROM salary_records GROUP BY employee_id, {ym_column} HAVING c > 1 LIMIT 1")
+            ).fetchone()
+            if not duplicate_salary and "uq_salary_employee_month" not in salary_indexes:
+                conn.execute(text(f"CREATE UNIQUE INDEX uq_salary_employee_month ON salary_records (employee_id, {ym_column})"))
         if "contracts" in table_names:
             contract_columns = {column["name"] for column in inspector.get_columns("contracts")}
             if "is_deleted" not in contract_columns:

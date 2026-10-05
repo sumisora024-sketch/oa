@@ -1,26 +1,31 @@
+import re
+import shutil
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.permissions import ensure_role
-from app.core.config import get_settings
+from app.core.config import ROOT_DIR, get_settings
 from app.db import get_db
 from app.deps import get_current_user
 from app.models import Contract, Employee, SalaryRecord, User
 from app.schemas import ContractCreate, ContractOut, ContractUpdate, SalaryRecordOut, SalaryRecordUpdate
 from app.services.pdf_parser import extract_text_from_pdf, parse_contract_attributes
 from app.services.contract_reminders import LONG_TERM_END_DATE, send_contract_due_reminders
-from app.services.salary import current_year_month, ensure_salary_record, ensure_salary_records, recalculate_salary_record, refresh_salary_record_for_employee, salary_record_out, sync_employee_annual_salary
+from app.services.salary import current_year_month, ensure_salary_record, ensure_salary_records, recalculate_salary_record, refresh_salary_record_for_employee, refresh_salary_records_for_employee, salary_record_out, sync_employee_annual_salary
 from app.services.salary_documents import build_annual_salary_pdf, build_salary_pdf
+from app.services.salary_signals import register_salary_refresh
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
+CONTRACT_PDF_DIR = ROOT_DIR / "backend" / "storage" / "contracts"
 
 
 def can_access_contract(user: User, contract: Contract) -> bool:
-    if user.role in {"admin", "hr"}:
+    if user.role in {"admin", "soumu", "hr"}:
         return True
     return user.employee_id == contract.employee_id
 
@@ -29,9 +34,54 @@ def salary_out(record: SalaryRecord) -> dict:
     return salary_record_out(record)
 
 
+def normalize_contract_attributes(value: dict | None) -> dict:
+    attrs = dict(value or {})
+    allowances = []
+    for item in attrs.get("allowances") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        amount = max(int(item.get("amount") or 0), 0)
+        if name or amount:
+            allowances.append({"name": name or "手当", "amount": amount})
+    attrs["allowances"] = allowances
+    allowance_total = sum(item["amount"] for item in allowances)
+    attrs["allowance_total"] = allowance_total
+    base_salary = attrs.get("base_salary")
+    if base_salary not in (None, ""):
+        base_salary = max(int(base_salary), 0)
+        attrs["base_salary"] = base_salary
+        attrs["salary_total_monthly"] = base_salary + allowance_total
+        hours_match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*[-～]\s*(\d+(?:\.\d+)?)\s*", str(attrs.get("hours_range") or "140-180"))
+        if hours_match:
+            lower = float(hours_match.group(1))
+            upper = float(hours_match.group(2))
+            if lower > 0 and upper >= lower:
+                attrs["hours_range"] = f"{lower:g}-{upper:g}"
+                attrs["base_unit_price_low"] = round(base_salary / upper)
+                attrs["base_unit_price_high"] = round(base_salary / lower)
+    else:
+        attrs["base_salary"] = None
+        attrs["salary_total_monthly"] = None
+        attrs["base_unit_price_low"] = None
+        attrs["base_unit_price_high"] = None
+    return attrs
+
+
+def store_contract_pdf(file: UploadFile, contract_id: int) -> str:
+    CONTRACT_PDF_DIR.mkdir(parents=True, exist_ok=True)
+    original = Path(file.filename or "contract.pdf").name
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", original).strip("_") or "contract.pdf"
+    path = CONTRACT_PDF_DIR / f"contract_{contract_id}_{int(datetime.utcnow().timestamp())}_{safe_name}"
+    file.file.seek(0)
+    with path.open("wb") as output:
+        shutil.copyfileobj(file.file, output)
+    return str(path)
+
+
 @router.get("", response_model=list[ContractOut])
 def list_contracts(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    if user.role in {"admin", "hr"}:
+    if user.role in {"admin", "soumu", "hr"}:
         return list(db.scalars(select(Contract).where(Contract.is_deleted.is_(False)).order_by(Contract.created_at.desc())).all())
     if user.role == "employee" and user.employee_id:
         return list(
@@ -46,17 +96,18 @@ def list_contracts(db: Session = Depends(get_db), user: User = Depends(get_curre
 
 @router.post("", response_model=ContractOut)
 def create_contract(payload: ContractCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     employee = db.get(Employee, payload.employee_id)
     if not employee or employee.is_deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="人员不存在")
     data = payload.model_dump()
     data["end_date"] = data.get("end_date") or LONG_TERM_END_DATE
+    data["attributes"] = normalize_contract_attributes(data.get("attributes"))
     contract = Contract(**data)
     db.add(contract)
     db.flush()
     sync_employee_annual_salary(db, employee)
-    refresh_salary_record_for_employee(db, employee.id)
+    contract.salary_sync = refresh_salary_records_for_employee(db, employee.id, reason="contract_created")
     db.commit()
     db.refresh(contract)
     return contract
@@ -70,7 +121,7 @@ def import_pdf_contract(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     employee = db.get(Employee, employee_id)
     if not employee or employee.is_deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="人员不存在")
@@ -85,12 +136,13 @@ def import_pdf_contract(
         end_date=date.fromisoformat(attrs["end_date"]) if attrs.get("end_date") else LONG_TERM_END_DATE,
         pdf_filename=file.filename,
         parsed_text=text,
-        attributes=attrs,
+        attributes=normalize_contract_attributes(attrs),
     )
     db.add(contract)
     db.flush()
+    contract.pdf_path = store_contract_pdf(file, contract.id)
     sync_employee_annual_salary(db, employee)
-    refresh_salary_record_for_employee(db, employee.id)
+    contract.salary_sync = refresh_salary_records_for_employee(db, employee.id, reason="contract_imported")
     db.commit()
     db.refresh(contract)
     return contract
@@ -98,7 +150,7 @@ def import_pdf_contract(
 
 @router.get("/reminders/due", response_model=list[ContractOut])
 def due_reminders(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     today = date.today()
     soon = today + timedelta(days=30)
     stmt = select(Contract).where(
@@ -112,7 +164,7 @@ def due_reminders(db: Session = Depends(get_db), user: User = Depends(get_curren
 
 @router.post("/reminders/send")
 def send_due_reminders(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     return {"sent": send_contract_due_reminders(), "recipient": get_settings().hr_reminder_email}
 
 
@@ -122,7 +174,7 @@ def list_salaries(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     return [salary_out(record) for record in ensure_salary_records(db, year_month or current_year_month())]
 
 
@@ -133,7 +185,7 @@ def update_salary(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     record = db.get(SalaryRecord, record_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="工资记录不存在")
@@ -141,7 +193,8 @@ def update_salary(
     if record.locked and updates.get("locked") is not False:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="給与がロックされています。解除してから編集してください")
     next_locked = updates.pop("locked", None)
-    if record.locked and next_locked is False:
+    unlocking = record.locked and next_locked is False
+    if unlocking:
         record.locked = False
     if "estimated_annual_salary" in updates:
         annual = updates.pop("estimated_annual_salary")
@@ -166,10 +219,31 @@ def update_salary(
     if "insurance_fee" in detail_updates and "health_insurance" not in detail_updates:
         detail_updates["health_insurance"] = detail_updates["insurance_fee"]
     old_default_actual = (record.calculation_detail or {}).get("actual_salary_default")
-    salary_inputs_changed = "monthly_hours" in updates or bool(detail_updates)
+    salary_inputs_changed = bool(detail_updates) or unlocking
     if detail_updates:
         detail = dict(record.calculation_detail or {})
+        manual_deductions = set(detail.get("manual_deductions") or [])
+        deduction_keys = {
+            "pension",
+            "health_insurance",
+            "insurance_fee",
+            "care_insurance",
+            "employment_insurance",
+            "income_tax",
+        }
+        for key, value in detail_updates.items():
+            if key not in deduction_keys:
+                continue
+            canonical = "health_insurance" if key == "insurance_fee" else key
+            old_value = detail.get(canonical)
+            if canonical == "health_insurance" and old_value is None:
+                old_value = detail.get("insurance_fee")
+            if old_value is None and value not in (None, "", 0):
+                manual_deductions.add(canonical)
+            elif old_value is not None and int(value or 0) != int(old_value or 0):
+                manual_deductions.add(canonical)
         detail.update(detail_updates)
+        detail["manual_deductions"] = sorted(manual_deductions)
         record.calculation_detail = detail
     if (
         salary_inputs_changed
@@ -193,6 +267,13 @@ def update_salary(
     )
     if next_locked is True:
         record.locked = True
+    register_salary_refresh(
+        db,
+        record.employee_id,
+        months={record.year_month},
+        include_current=False,
+        reason="salary_record_updated",
+    )
     db.commit()
     db.refresh(record)
     return salary_out(record)
@@ -220,7 +301,7 @@ def download_salary_pdf(record_id: int, db: Session = Depends(get_db), user: Use
     record = db.get(SalaryRecord, record_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="工资记录不存在")
-    if user.role not in {"admin", "hr"} and user.employee_id != record.employee_id:
+    if user.role not in {"admin", "soumu", "hr"} and user.employee_id != record.employee_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     if not record.locked:
         refreshed = refresh_salary_record_for_employee(db, record.employee_id, record.year_month)
@@ -232,7 +313,12 @@ def download_salary_pdf(record_id: int, db: Session = Depends(get_db), user: Use
     return StreamingResponse(
         buffer,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=salary-{record.employee_id}-{record.year_month}.pdf"},
+        headers={
+            "Content-Disposition": f"attachment; filename=salary-{record.employee_id}-{record.year_month}-{int(datetime.utcnow().timestamp())}.pdf",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
@@ -241,7 +327,7 @@ def download_annual_salary_pdf(record_id: int, db: Session = Depends(get_db), us
     record = db.get(SalaryRecord, record_id)
     if not record or not record.employee:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="工资记录不存在")
-    if user.role not in {"admin", "hr"} and user.employee_id != record.employee_id:
+    if user.role not in {"admin", "soumu", "hr"} and user.employee_id != record.employee_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="权限不足")
     sync_employee_annual_salary(db, record.employee)
     db.commit()
@@ -249,7 +335,12 @@ def download_annual_salary_pdf(record_id: int, db: Session = Depends(get_db), us
     return StreamingResponse(
         buffer,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=annual-salary-{record.employee_id}.pdf"},
+        headers={
+            "Content-Disposition": f"attachment; filename=annual-salary-{record.employee_id}-{int(datetime.utcnow().timestamp())}.pdf",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
     )
 
 
@@ -263,19 +354,59 @@ def get_contract(contract_id: int, db: Session = Depends(get_db), user: User = D
     return contract
 
 
+@router.get("/{contract_id}/pdf/download")
+def download_contract_pdf(
+    contract_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    contract = db.get(Contract, contract_id)
+    if not contract or contract.is_deleted or not contract.pdf_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="契約PDFが見つかりません")
+    if not can_access_contract(user, contract):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="権限がありません")
+    path = Path(contract.pdf_path).resolve()
+    storage_root = CONTRACT_PDF_DIR.resolve()
+    if not path.is_relative_to(storage_root) or not path.exists() or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="契約PDFが見つかりません")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=contract.pdf_filename or path.name,
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 @router.put("/{contract_id}", response_model=ContractOut)
 def update_contract(contract_id: int, payload: ContractUpdate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     contract = db.get(Contract, contract_id)
     if not contract or contract.is_deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="契约不存在")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    previous_employee_id = contract.employee_id
+    if "employee_id" in updates:
+        target_employee = db.get(Employee, updates["employee_id"])
+        if not target_employee or target_employee.is_deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="社員が見つかりません")
+    if "parsed_text" in updates and user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="解析テキストを編集できるのは管理者のみです")
+    if "attributes" in updates:
+        updates["attributes"] = normalize_contract_attributes(updates["attributes"])
+    for key, value in updates.items():
         if key == "end_date" and value is None:
             value = LONG_TERM_END_DATE
         setattr(contract, key, value)
-    if contract.employee:
-        sync_employee_annual_salary(db, contract.employee)
-        refresh_salary_record_for_employee(db, contract.employee.id)
+    affected_employee_ids = {previous_employee_id, contract.employee_id}
+    salary_sync = []
+    for employee_id in affected_employee_ids:
+        employee = db.get(Employee, employee_id)
+        if employee and not employee.is_deleted:
+            sync_employee_annual_salary(db, employee)
+            salary_sync.append(
+                refresh_salary_records_for_employee(db, employee.id, reason="contract_updated")
+            )
+    contract.salary_sync = {"employees": salary_sync}
     db.commit()
     db.refresh(contract)
     return contract
@@ -283,7 +414,7 @@ def update_contract(contract_id: int, payload: ContractUpdate, db: Session = Dep
 
 @router.delete("/{contract_id}")
 def delete_contract(contract_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    ensure_role(user, {"admin", "hr"})
+    ensure_role(user, {"admin", "soumu", "hr"})
     contract = db.get(Contract, contract_id)
     if not contract or contract.is_deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="契约不存在")
@@ -291,6 +422,7 @@ def delete_contract(contract_id: int, db: Session = Depends(get_db), user: User 
     contract.is_deleted = True
     contract.deleted_at = datetime.utcnow()
     contract.attributes = {**(contract.attributes or {}), "deleted": True}
-    refresh_salary_record_for_employee(db, employee_id)
+    db.flush()
+    salary_sync = refresh_salary_records_for_employee(db, employee_id, reason="contract_deleted")
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "salary_sync": salary_sync}

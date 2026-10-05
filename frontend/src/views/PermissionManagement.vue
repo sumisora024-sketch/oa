@@ -6,18 +6,20 @@ import { useI18n } from 'vue-i18n'
 import { api } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const auth = useAuthStore()
 const loading = ref(false)
 const saving = ref(false)
-const defaultRoles = ['admin', 'hr', 'pm', 'employee', 'partner']
+const defaultRoles = ['admin', 'soumu', 'hr', 'pm', 'employee', 'partner']
 const roles = ref(defaultRoles)
 const permissions = ref({})
 const activeRole = ref('hr')
 const selectedKeys = ref([])
+const platformLabel = computed(() => ({ ja: '共通機能設定', zh: '公共能力设置', en: 'Shared capabilities' }[locale.value] || '共通機能設定'))
 
 const roleLabels = {
   admin: 'Admin',
+  soumu: '総務',
   hr: 'HR',
   pm: 'PM / 営業',
   employee: '一般社員',
@@ -90,7 +92,8 @@ const groups = computed(() => [
       { key: 'home', label: t('nav.home') },
       { key: 'projects', label: t('nav.projects') },
       { key: 'settings.mail', label: t('nav.mailSettings') },
-      { key: 'settings.permissions', label: t('nav.permissionManagement'), disabled: true }
+      { key: 'settings.permissions', label: t('nav.permissionManagement'), disabled: true },
+      { key: 'settings.platform', label: platformLabel.value, disabled: true }
     ]
   }
 ])

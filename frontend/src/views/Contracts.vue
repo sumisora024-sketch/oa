@@ -1,33 +1,33 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute } from 'vue-router'
-import { Columns3, Download, Eye, FileUp, Plus, RefreshCw, Save, Search, Trash2 } from 'lucide-vue-next'
+import { useRoute, useRouter } from 'vue-router'
+import { Columns3, Download, Eye, FileUp, Pencil, Plus, RefreshCw, Save, Search, Trash2 } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import TablePager from '../components/TablePager.vue'
 import { usePagination } from '../composables/pagination'
 import { api } from '../api/client'
 import { useAuthStore } from '../stores/auth'
-import { downloadCsv as exportCsv } from '../utils/csv'
 
 const { t } = useI18n()
 const auth = useAuthStore()
 const route = useRoute()
+const router = useRouter()
 const rows = ref([])
 const employees = ref([])
 const salaryRows = ref([])
-const selectedContracts = ref([])
 const selectedSalaries = ref([])
 const detailRow = ref(null)
 const activeTab = ref(route.name === 'salaryManagement' ? 'salaries' : 'contracts')
 const dialog = ref(false)
+const editingContractId = ref(null)
 const pdfDialog = ref(false)
 const detailDrawer = ref(false)
 const q = ref('')
 const salaryQ = ref('')
 const formRef = ref(null)
 const pdfFormRef = ref(null)
-const form = reactive({ employee_id: null, title: '', contract_type: '', vendor_company: '', start_date: '', end_date: '' })
+const form = reactive(defaultContractForm())
 const pdfForm = reactive({ employee_id: null, title: '雇用契約書', file: null })
 const salaryMonth = ref(currentMonth())
 const contractTypeOptions = ['正社員', '契約社員', 'freelance', 'アルバイト', 'その他']
@@ -54,7 +54,8 @@ const rules = computed(() => ({
   employee_id: [{ required: true, message: t('validation.required'), trigger: 'change' }],
   title: [{ required: true, message: t('validation.required'), trigger: 'blur' }],
   contract_type: [{ required: true, message: t('validation.required'), trigger: 'change' }],
-  vendor_company: [{ required: true, message: t('validation.required'), trigger: 'change' }]
+  vendor_company: [{ required: true, message: t('validation.required'), trigger: 'change' }],
+  hours_range: [{ pattern: /^\d+(?:\.\d+)?-\d+(?:\.\d+)?$/, message: t('contracts.hoursRangeInvalid'), trigger: 'blur' }]
 }))
 const pdfRules = computed(() => ({
   employee_id: [{ required: true, message: t('validation.required'), trigger: 'change' }],
@@ -87,10 +88,94 @@ const filteredContracts = computed(() => {
 const filteredSalaries = computed(() => {
   const text = salaryQ.value.trim().toLowerCase()
   if (!text) return salaryRows.value
-  return salaryRows.value.filter((row) => String(row.employee_name || employeeNameById.value[row.employee_id] || row.employee_id).toLowerCase().includes(text))
+  return salaryRows.value.filter((row) => [row.employee_name, row.employee_email, row.employee_id]
+    .some((value) => String(value || '').toLowerCase().includes(text)))
 })
 const { pager: contractPager, pageRows: pagedContracts } = usePagination(filteredContracts)
 const { pager: salaryPager, pageRows: pagedSalaries } = usePagination(filteredSalaries)
+
+function defaultContractForm() {
+  return {
+    employee_id: null,
+    title: '',
+    contract_type: '',
+    vendor_company: '',
+    start_date: '',
+    end_date: '',
+    base_salary: null,
+    hours_range: '140-180',
+    workplace: '',
+    duty: '',
+    parsed_text: '',
+    allowances: [],
+    source_attributes: {}
+  }
+}
+
+function openContractCreate() {
+  editingContractId.value = null
+  Object.assign(form, defaultContractForm())
+  dialog.value = true
+}
+
+function openContractEdit(row) {
+  editingContractId.value = row.id
+  Object.assign(form, {
+    employee_id: row.employee_id,
+    title: row.title || '',
+    contract_type: row.contract_type || '',
+    vendor_company: row.vendor_company || '',
+    start_date: row.start_date || '',
+    end_date: row.end_date === '9999-12-31' ? '' : (row.end_date || ''),
+    base_salary: row.attributes?.base_salary ?? null,
+    hours_range: row.attributes?.hours_range || '140-180',
+    workplace: row.attributes?.workplace || '',
+    duty: row.attributes?.duty || '',
+    parsed_text: row.parsed_text || '',
+    allowances: (row.attributes?.allowances || []).map((item) => ({ name: item.name || '', amount: Number(item.amount || 0) })),
+    source_attributes: { ...(row.attributes || {}) }
+  })
+  dialog.value = true
+}
+
+function addAllowance() {
+  form.allowances.push({ name: '', amount: 0 })
+}
+
+function removeAllowance(index) {
+  form.allowances.splice(index, 1)
+}
+
+function contractPayload() {
+  return {
+    employee_id: form.employee_id,
+    title: form.title,
+    contract_type: form.contract_type,
+    vendor_company: form.vendor_company,
+    start_date: form.start_date || null,
+    end_date: form.end_date || null,
+    parsed_text: form.parsed_text || null,
+    attributes: {
+      ...form.source_attributes,
+      base_salary: form.base_salary,
+      hours_range: form.hours_range || '140-180',
+      workplace: form.workplace || null,
+      duty: form.duty || null,
+      allowances: form.allowances
+        .map((item) => ({ name: String(item.name || '').trim(), amount: Number(item.amount || 0) }))
+        .filter((item) => item.name || item.amount)
+    }
+  }
+}
+
+function warnLockedSalary(sync) {
+  if (!sync) return false
+  const entries = sync.employees || [sync]
+  const locked = entries.flatMap((entry) => (entry.locked_months || []).map((month) => `${entry.employee_id}: ${month}`))
+  if (!locked.length) return false
+  ElMessage.warning(`給与がロックされているため金額を更新していません: ${locked.join(', ')}`)
+  return true
+}
 
 async function load() {
   const { data } = await api.get('/contracts')
@@ -102,6 +187,7 @@ async function load() {
       employees.value = []
     }
   }
+  applyContractQueryFilter()
 }
 
 function currentMonth() {
@@ -192,15 +278,23 @@ function handleTabChange(name) {
 function syncRouteTab() {
   activeTab.value = route.name === 'salaryManagement' ? 'salaries' : 'contracts'
   if (activeTab.value === 'salaries' && auth.can('contracts', 'update')) loadSalaries()
+  if (activeTab.value === 'contracts') applyContractQueryFilter()
 }
 
 async function save() {
   try {
     await formRef.value?.validate()
-    await api.post('/contracts', { ...form, end_date: form.end_date || null })
-    ElMessage.success(t('common.success'))
+    const payload = contractPayload()
+    let response
+    if (editingContractId.value) {
+      response = await api.put(`/contracts/${editingContractId.value}`, payload)
+    } else {
+      response = await api.post('/contracts', payload)
+    }
+    if (!warnLockedSalary(response.data?.salary_sync)) ElMessage.success(t('common.success'))
     dialog.value = false
     await load()
+    if (auth.can('contracts', 'update')) await loadSalaries()
   } catch (error) {
     const detail = error.response?.data?.detail
     ElMessage.error(Array.isArray(detail) ? detail.map((item) => item.msg || item).join(' / ') : detail || t('common.failed'))
@@ -210,24 +304,10 @@ async function save() {
 async function deleteContract(row) {
   try {
     await ElMessageBox.confirm(t('common.confirmDelete'), t('common.delete'), { type: 'warning' })
-    await api.delete(`/contracts/${row.id}`)
-    ElMessage.success(t('common.success'))
+    const { data } = await api.delete(`/contracts/${row.id}`)
+    if (!warnLockedSalary(data?.salary_sync)) ElMessage.success(t('common.success'))
     await load()
-  } catch (error) {
-    if (error === 'cancel') return
-    const detail = error.response?.data?.detail
-    ElMessage.error(detail || t('common.failed'))
-  }
-}
-
-async function deleteSelectedContracts() {
-  if (!selectedContracts.value.length || !auth.can('contracts', 'delete')) return
-  try {
-    await ElMessageBox.confirm(`${selectedContracts.value.length}件を削除します。`, t('common.delete'), { type: 'warning' })
-    await Promise.all(selectedContracts.value.map((row) => api.delete(`/contracts/${row.id}`)))
-    selectedContracts.value = []
-    ElMessage.success(t('common.success'))
-    await load()
+    if (auth.can('contracts', 'update')) await loadSalaries()
   } catch (error) {
     if (error === 'cancel') return
     const detail = error.response?.data?.detail
@@ -246,6 +326,7 @@ async function importPdf() {
     ElMessage.success(t('common.success'))
     pdfDialog.value = false
     await load()
+    if (auth.can('contracts', 'update')) await loadSalaries()
   } catch (error) {
     const detail = error.response?.data?.detail
     if (detail) ElMessage.error(Array.isArray(detail) ? detail.map((item) => item.msg || item).join(' / ') : detail)
@@ -262,6 +343,23 @@ function contractEmployeeName(row) {
   return row.employee_id
 }
 
+function salaryEmployeeName(row) {
+  return row.employee_name || employeeNameById.value[row.employee_id] || row.employee_id
+}
+
+function applyContractQueryFilter() {
+  if (route.name !== 'internalContracts') return
+  const employeeId = Number(route.query.employee_id || 0)
+  if (!employeeId) return
+  q.value = employeeNameById.value[employeeId] || String(employeeId)
+}
+
+async function openEmployeeContracts(row) {
+  await router.push({ name: 'internalContracts', query: { employee_id: row.employee_id } })
+  activeTab.value = 'contracts'
+  applyContractQueryFilter()
+}
+
 function money(value) {
   if (value === null || value === undefined || value === '') return '-'
   return Number(value).toLocaleString()
@@ -272,9 +370,13 @@ function openDetail(row) {
   detailDrawer.value = true
 }
 
+function downloadContract(row) {
+  if (row.pdf_download_url) window.open(row.pdf_download_url, '_blank')
+}
+
 function downloadSalary(row, kind) {
   const suffix = kind === 'annual' ? 'annual-estimate.pdf' : 'payslip.pdf'
-  window.open(`/api/contracts/salaries/${row.id}/${suffix}`, '_blank')
+  window.open(`/api/contracts/salaries/${row.id}/${suffix}?v=${encodeURIComponent(row.updated_at || Date.now())}`, '_blank')
 }
 
 function textOrDash(value) {
@@ -303,41 +405,12 @@ function columnLabel(key) {
   return labels[key]
 }
 
-function downloadContractRows(rowsToExport, filename) {
-  const result = exportCsv(rowsToExport, [
-    { key: 'title', label: t('fields.title') },
-    { label: t('fields.employee'), value: contractEmployeeName },
-    { key: 'contract_type', label: t('fields.contractType') },
-    { key: 'vendor_company', label: t('fields.vendorCompany') },
-    { label: t('fields.baseSalary'), value: (row) => row.attributes?.base_salary },
-    { label: t('fields.allowanceTotal'), value: (row) => row.attributes?.allowance_total },
-    { label: t('fields.baseUnitPriceLow'), value: (row) => row.attributes?.base_unit_price_low },
-    { label: t('fields.baseUnitPriceHigh'), value: (row) => row.attributes?.base_unit_price_high },
-    { key: 'start_date', label: t('fields.startDate') },
-    { label: t('fields.endDate'), value: displayEndDate },
-    { label: t('fields.workplace'), value: (row) => row.attributes?.workplace },
-    { label: t('fields.duty'), value: (row) => row.attributes?.duty }
-  ], filename)
-  if (!result.ok) ElMessage.warning(result.message)
-}
-
-function handleContractBatchCommand(command) {
-  if (command === 'delete') {
-    deleteSelectedContracts()
-    return
-  }
-  if (command === 'selected') {
-    downloadContractRows(selectedContracts.value, 'contracts-selected.csv')
-    return
-  }
-  downloadContractRows(filteredContracts.value, 'contracts-list.csv')
-}
-
 onMounted(async () => {
   await load()
   if (isSalaryRoute.value && auth.can('contracts', 'update')) await loadSalaries()
 })
 watch(() => route.name, syncRouteTab)
+watch(() => route.query.employee_id, applyContractQueryFilter)
 </script>
 
 <template>
@@ -346,12 +419,9 @@ watch(() => route.name, syncRouteTab)
       <h2>{{ isSalaryRoute ? t('contracts.salaryManagement') : t('nav.internalContracts') }}</h2>
       <div class="toolbar">
         <el-input v-if="isContractTab" v-model="q" :prefix-icon="Search" :placeholder="t('common.search')" clearable style="width: 240px" />
-        <span v-if="isContractTab && selectedContracts.length" class="muted">{{ selectedContracts.length }} 件選択中</span>
         <span v-if="activeTab === 'salaries' && selectedSalaries.length" class="muted">{{ selectedSalaries.length }} 件選択中</span>
-        <el-button v-if="isContractTab" type="danger" :icon="Trash2" :disabled="!selectedContracts.length || !auth.can('contracts', 'delete')" @click="deleteSelectedContracts">選択行を削除</el-button>
-        <el-button v-if="isContractTab" :icon="Download" :disabled="!selectedContracts.length" @click="downloadContractRows(selectedContracts, 'contracts-selected.csv')">選択行をダウンロード</el-button>
         <el-button :icon="RefreshCw" @click="refreshCurrent">{{ t('common.refresh') }}</el-button>
-        <el-button v-if="isContractTab && auth.can('contracts', 'create')" type="primary" :icon="Plus" @click="dialog = true">{{ t('common.create') }}</el-button>
+        <el-button v-if="isContractTab && auth.user?.role === 'admin'" type="primary" :icon="Plus" @click="openContractCreate">{{ t('contracts.manualCreate') }}</el-button>
         <el-button v-if="isContractTab && auth.can('contracts', 'import')" :icon="FileUp" @click="pdfDialog = true">{{ t('contracts.importPdf') }}</el-button>
         <el-popover v-if="isContractTab" placement="bottom-end" width="240" trigger="click">
           <template #reference>
@@ -368,8 +438,7 @@ watch(() => route.name, syncRouteTab)
     <el-tabs v-model="activeTab" :class="{ 'single-route-tabs': isSalaryRoute }" @tab-change="handleTabChange">
       <el-tab-pane v-if="!isSalaryRoute" :label="t('contracts.contractInfo')" name="contracts">
         <p class="muted">{{ t('contracts.batchNote') }}</p>
-        <el-table :data="pagedContracts" height="calc(100vh - 310px)" stripe @selection-change="selectedContracts = $event">
-          <el-table-column type="selection" width="46" />
+        <el-table :data="pagedContracts" height="calc(100vh - 310px)" stripe>
           <el-table-column v-if="visibleColumns.title && !isEmployeeRole" prop="title" :label="t('fields.title')" min-width="180" sortable />
           <el-table-column v-if="visibleColumns.employee && !isEmployeeRole" :label="t('fields.employee')" min-width="140" sortable>
             <template #default="{ row }">{{ contractEmployeeName(row) }}</template>
@@ -398,9 +467,11 @@ watch(() => route.name, syncRouteTab)
           <el-table-column v-if="visibleColumns.workplace" :label="t('fields.workplace')" min-width="180">
             <template #default="{ row }">{{ row.attributes?.workplace || '-' }}</template>
           </el-table-column>
-          <el-table-column fixed="right" :label="t('common.actions')" width="130">
+          <el-table-column fixed="right" :label="t('common.actions')" width="190">
             <template #default="{ row }">
               <el-button text :icon="Eye" @click="openDetail(row)" />
+              <el-button v-if="auth.user?.role === 'admin'" text type="primary" :icon="Pencil" @click="openContractEdit(row)" />
+              <el-button v-if="row.pdf_download_url" text :icon="Download" @click="downloadContract(row)" />
               <el-button v-if="auth.can('contracts', 'delete')" text type="danger" :icon="Trash2" @click="deleteContract(row)" />
             </template>
           </el-table-column>
@@ -412,12 +483,21 @@ watch(() => route.name, syncRouteTab)
         <div class="toolbar section-toolbar">
           <el-input v-model="salaryQ" :prefix-icon="Search" :placeholder="t('common.search')" clearable style="width: 240px" />
           <el-date-picker v-model="salaryMonth" type="month" value-format="YYYY-MM" :clearable="false" @change="loadSalaries" />
-          <el-button :icon="RefreshCw" @click="loadSalaries">{{ t('common.refresh') }}</el-button>
         </div>
         <el-table :data="pagedSalaries" height="calc(100vh - 365px)" stripe @selection-change="selectedSalaries = $event">
           <el-table-column type="selection" width="46" />
           <el-table-column :label="t('fields.employee')" min-width="160">
-            <template #default="{ row }">{{ row.employee_name || employeeNameById[row.employee_id] || row.employee_id }}</template>
+            <template #default="{ row }">
+              <div class="salary-employee-cell">
+                <div>
+                  <el-button link :type="row.employee_is_deleted ? 'danger' : 'primary'" :class="{ 'deleted-employee-link': row.employee_is_deleted }" @click="openEmployeeContracts(row)">
+                    {{ salaryEmployeeName(row) }}
+                  </el-button>
+                  <el-tag v-if="row.employee_is_deleted" size="small" type="danger" effect="plain">退職</el-tag>
+                </div>
+                <small>{{ row.employee_email || `ID: ${row.employee_id}` }}</small>
+              </div>
+            </template>
           </el-table-column>
           <el-table-column prop="year_month" :label="t('fields.yearMonth')" width="120" sortable />
           <el-table-column :label="t('fields.hoursRange')" width="130">
@@ -509,7 +589,7 @@ watch(() => route.name, syncRouteTab)
       </el-tab-pane>
     </el-tabs>
 
-    <el-dialog v-model="dialog" :title="t('common.create')" width="620px">
+    <el-dialog v-model="dialog" :title="editingContractId ? t('contracts.manualEdit') : t('contracts.manualCreate')" width="760px">
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="form-grid">
         <el-form-item :label="t('fields.employee')" prop="employee_id">
           <el-select v-model="form.employee_id" filterable>
@@ -529,6 +609,21 @@ watch(() => route.name, syncRouteTab)
         </el-form-item>
         <el-form-item :label="t('fields.startDate')"><el-date-picker v-model="form.start_date" value-format="YYYY-MM-DD" /></el-form-item>
         <el-form-item :label="t('fields.endDate')"><el-date-picker v-model="form.end_date" value-format="YYYY-MM-DD" /></el-form-item>
+        <el-form-item :label="t('fields.baseSalary')"><el-input-number v-model="form.base_salary" :min="0" :controls="false" /></el-form-item>
+        <el-form-item :label="t('fields.hoursRange')" prop="hours_range"><el-input v-model="form.hours_range" placeholder="140-180" /></el-form-item>
+        <el-form-item :label="t('fields.workplace')"><el-input v-model="form.workplace" /></el-form-item>
+        <el-form-item :label="t('fields.duty')"><el-input v-model="form.duty" /></el-form-item>
+        <el-form-item class="span-2" :label="t('fields.allowances')">
+          <div class="allowance-editor">
+            <div v-for="(item, index) in form.allowances" :key="index" class="allowance-row">
+              <el-input v-model="item.name" :placeholder="t('fields.allowances')" />
+              <el-input-number v-model="item.amount" :min="0" :controls="false" />
+              <el-button :icon="Trash2" circle @click="removeAllowance(index)" />
+            </div>
+            <el-button :icon="Plus" @click="addAllowance">{{ t('contracts.addAllowance') }}</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item class="span-2" :label="t('fields.parsedText')"><el-input v-model="form.parsed_text" type="textarea" :rows="5" /></el-form-item>
       </el-form>
       <template #footer><el-button @click="dialog = false">{{ t('common.cancel') }}</el-button><el-button type="primary" @click="save">{{ t('common.save') }}</el-button></template>
     </el-dialog>
@@ -616,7 +711,42 @@ watch(() => route.name, syncRouteTab)
   margin-top: 2px;
 }
 
+.deleted-employee-link {
+  color: #d92d20;
+  font-weight: 700;
+}
+
 .single-route-tabs :deep(.el-tabs__header) {
   display: none;
+}
+
+.allowance-editor {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+
+.allowance-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 180px 36px;
+  gap: 8px;
+  align-items: center;
+}
+
+.salary-employee-cell {
+  display: grid;
+  gap: 2px;
+  line-height: 1.25;
+}
+
+.salary-employee-cell small {
+  color: var(--el-text-color-secondary);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .allowance-row {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
